@@ -16,6 +16,7 @@ export function useAuth() {
   const isTeacher = () => hasRole(["TEACHER", "ADMIN", "SUPER_ADMIN"]);
   const isScanner = () => hasRole(["SCANNER", "ADMIN", "SUPER_ADMIN"]);
   const isParent = () => hasRole(["PARENT"]);
+  const isStaff = () => hasRole(["STAFF", "ADMIN", "SUPER_ADMIN"]);
 
   return {
     ...ctx,
@@ -25,5 +26,6 @@ export function useAuth() {
     isTeacher,
     isScanner,
     isParent,
+    isStaff,
   };
 }

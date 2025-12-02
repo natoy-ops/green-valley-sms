@@ -47,11 +47,44 @@ interface CsvImportRowError {
 interface ParsedCsvRow {
   lrn: string;
   firstName: string;
+  middleName: string | null;
   lastName: string;
   levelName: string;
   sectionName: string;
+  studentEmail: string | null;
+  guardianFirstName: string | null;
+  guardianMiddleName: string | null;
+  guardianLastName: string | null;
   guardianPhone: string | null;
   guardianEmail: string | null;
+}
+
+interface StudentCredential {
+  studentName: string;
+  email: string;
+  temporaryPassword: string;
+}
+
+interface GuardianCredential {
+  guardianName: string;
+  email: string;
+  temporaryPassword: string;
+  linkedStudents: string[];
+}
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function generateRandomPassword(length = 16): string {
+  const charset =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
+  const randomValues = new Uint32Array(length);
+  crypto.getRandomValues(randomValues);
+
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += charset[randomValues[i] % charset.length];
+  }
+  return result;
 }
 
 interface LevelRow {
@@ -71,6 +104,7 @@ interface StudentRow {
   id: string;
   student_school_id: string;
   first_name: string;
+  middle_name: string | null;
   last_name: string;
   section_id: string;
   guardian_phone: string | null;
@@ -111,9 +145,14 @@ function parseCsv(content: string): { rows: ParsedCsvRow[]; errors: CsvImportRow
 
   const idxLrn = indexOf("ID / LRN");
   const idxFirstName = indexOf("First Name");
+  const idxMiddleName = indexOf("Middle Name");
   const idxLastName = indexOf("Last Name");
   const idxLevel = indexOf("Grade / Level");
   const idxSection = indexOf("Section");
+  const idxStudentEmail = indexOf("Student Email");
+  const idxGuardianFirstName = indexOf("Guardian First Name");
+  const idxGuardianMiddleName = indexOf("Guardian Middle Name");
+  const idxGuardianLastName = indexOf("Guardian Last Name");
   const idxGuardianPhone = indexOf("Guardian Phone");
   const idxGuardianEmail = indexOf("Guardian Email");
 
@@ -133,6 +172,8 @@ function parseCsv(content: string): { rows: ParsedCsvRow[]; errors: CsvImportRow
     const columns = line.split(",").map((value) => value.trim().replace(/^"|"$/g, ""));
 
     const firstName = columns[idxFirstName] ?? "";
+    const middleName =
+      idxMiddleName === -1 ? null : (columns[idxMiddleName] ?? "") || null;
     const lastName = columns[idxLastName] ?? "";
     const levelName = columns[idxLevel] ?? "";
 
@@ -146,15 +187,24 @@ function parseCsv(content: string): { rows: ParsedCsvRow[]; errors: CsvImportRow
 
     const lrn = idxLrn === -1 ? "" : columns[idxLrn] ?? "";
     const sectionName = idxSection === -1 ? "" : columns[idxSection] ?? "";
+    const studentEmail = idxStudentEmail === -1 ? null : (columns[idxStudentEmail] ?? "") || null;
+    const guardianFirstName = idxGuardianFirstName === -1 ? null : (columns[idxGuardianFirstName] ?? "") || null;
+    const guardianMiddleName = idxGuardianMiddleName === -1 ? null : (columns[idxGuardianMiddleName] ?? "") || null;
+    const guardianLastName = idxGuardianLastName === -1 ? null : (columns[idxGuardianLastName] ?? "") || null;
     const guardianPhone = idxGuardianPhone === -1 ? null : (columns[idxGuardianPhone] ?? "") || null;
     const guardianEmail = idxGuardianEmail === -1 ? null : (columns[idxGuardianEmail] ?? "") || null;
 
     rows.push({
       lrn,
       firstName,
+      middleName,
       lastName,
       levelName,
       sectionName,
+      studentEmail,
+      guardianFirstName,
+      guardianMiddleName,
+      guardianLastName,
       guardianPhone,
       guardianEmail,
     });
@@ -310,6 +360,7 @@ export async function POST(request: NextRequest) {
     return {
       student_school_id: baseId,
       first_name: row.firstName,
+      middle_name: row.middleName,
       last_name: row.lastName,
       section_id: section.id,
       guardian_phone: row.guardianPhone,
@@ -319,11 +370,12 @@ export async function POST(request: NextRequest) {
     };
   });
 
+  // Use upsert for idempotency - re-running the same CSV is safe
   const { data, error } = await supabase
     .from("students")
-    .insert(insertPayloads)
+    .upsert(insertPayloads, { onConflict: "student_school_id" })
     .select(
-      "id, student_school_id, first_name, last_name, section_id, guardian_phone, guardian_email, is_active, created_at"
+      "id, student_school_id, first_name, middle_name, last_name, section_id, guardian_phone, guardian_email, is_active, created_at"
     );
 
   if (error || !data) {
@@ -353,6 +405,302 @@ export async function POST(request: NextRequest) {
 
   const studentRows = data as StudentRow[];
 
+  // Third pass: create student accounts for rows with valid Student Email
+  const credentials: StudentCredential[] = [];
+  const accountWarnings: CsvImportRowError[] = [];
+
+  for (let i = 0; i < studentRows.length; i++) {
+    const studentRow = studentRows[i]!;
+    const source = resolvableRows[i]!.row;
+    const rowNumber = resolvableRows[i]!.rowNumber;
+
+    const studentEmail = source.studentEmail?.trim().toLowerCase() ?? null;
+
+    // Skip if no email or invalid email format
+    if (!studentEmail || !EMAIL_REGEX.test(studentEmail)) {
+      if (studentEmail) {
+        accountWarnings.push({
+          rowNumber,
+          message: `Invalid student email format: "${studentEmail}". Student imported but no login account created.`,
+        });
+      }
+      continue;
+    }
+
+    const fullName = `${studentRow.first_name} ${studentRow.last_name}`.trim();
+
+    try {
+      // Check if app_user already exists with this email
+      const { data: existingAppUser } = await supabase
+        .from("app_users")
+        .select("id")
+        .eq("email", studentEmail)
+        .maybeSingle();
+
+      let appUserId: string;
+
+      if (existingAppUser) {
+        // User already exists, just link them
+        appUserId = existingAppUser.id;
+        accountWarnings.push({
+          rowNumber,
+          message: `Student email "${studentEmail}" already has an account. Linked to existing account.`,
+        });
+      } else {
+        // Create new auth user
+        const randomPassword = generateRandomPassword();
+
+        const { data: createdAuthUser, error: authError } =
+          await supabase.auth.admin.createUser({
+            email: studentEmail,
+            password: randomPassword,
+            email_confirm: true,
+            user_metadata: {
+              full_name: fullName,
+            },
+          });
+
+        if (authError || !createdAuthUser?.user) {
+          const status = (authError as { status?: number } | null)?.status;
+          const reason = status === 422 ? "email already in use" : "auth creation failed";
+          accountWarnings.push({
+            rowNumber,
+            message: `Could not create login for "${studentEmail}": ${reason}. Student imported but no login account created.`,
+          });
+          continue;
+        }
+
+        appUserId = createdAuthUser.user.id;
+
+        // Create app_users row
+        const { error: appUserError } = await supabase.from("app_users").insert({
+          id: appUserId,
+          email: studentEmail,
+          full_name: fullName,
+          roles: ["STUDENT"],
+          primary_role: "STUDENT",
+          is_active: true,
+        });
+
+        if (appUserError) {
+          console.error("[students/import] Failed to insert app_users row", {
+            email: studentEmail,
+            appUserError,
+          });
+          accountWarnings.push({
+            rowNumber,
+            message: `Could not create app user for "${studentEmail}". Student imported but login may not work.`,
+          });
+          continue;
+        }
+
+        credentials.push({
+          studentName: fullName,
+          email: studentEmail,
+          temporaryPassword: randomPassword,
+        });
+      }
+
+      // Create student_guardians self-link (relationship = 'self')
+      const { error: linkError } = await supabase
+        .from("student_guardians")
+        .upsert(
+          {
+            student_id: studentRow.id,
+            app_user_id: appUserId,
+            relationship: "self",
+            is_primary: true,
+          },
+          { onConflict: "student_id,app_user_id" }
+        );
+
+      if (linkError) {
+        console.error("[students/import] Failed to create student_guardians link", {
+          studentId: studentRow.id,
+          appUserId,
+          linkError,
+        });
+        accountWarnings.push({
+          rowNumber,
+          message: `Could not link student account for "${studentEmail}". Login created but event visibility may not work.`,
+        });
+      }
+    } catch (err) {
+      console.error("[students/import] Unexpected error creating student account", {
+        email: studentEmail,
+        err,
+      });
+      accountWarnings.push({
+        rowNumber,
+        message: `Unexpected error creating account for "${studentEmail}". Student imported but no login account created.`,
+      });
+    }
+  }
+
+  // Fourth pass: create guardian/parent accounts for rows with valid Guardian Email
+  // Group by guardian email to avoid creating duplicate accounts for siblings
+  const guardianEmailToStudents = new Map<
+    string,
+    { studentId: string; studentName: string; rowNumber: number; guardianName: string }[]
+  >();
+
+  for (let i = 0; i < studentRows.length; i++) {
+    const studentRow = studentRows[i]!;
+    const source = resolvableRows[i]!.row;
+    const rowNumber = resolvableRows[i]!.rowNumber;
+
+    const guardianEmail = source.guardianEmail?.trim().toLowerCase() ?? null;
+
+    if (!guardianEmail || !EMAIL_REGEX.test(guardianEmail)) {
+      if (guardianEmail) {
+        accountWarnings.push({
+          rowNumber,
+          message: `Invalid guardian email format: "${guardianEmail}". No parent account created.`,
+        });
+      }
+      continue;
+    }
+
+    // Build guardian full name from available fields
+    const guardianNameParts = [
+      source.guardianFirstName,
+      source.guardianMiddleName,
+      source.guardianLastName,
+    ].filter(Boolean);
+    const guardianName = guardianNameParts.length > 0
+      ? guardianNameParts.join(" ")
+      : `Guardian of ${studentRow.first_name} ${studentRow.last_name}`;
+
+    const studentName = `${studentRow.first_name} ${studentRow.last_name}`.trim();
+
+    const existing = guardianEmailToStudents.get(guardianEmail) ?? [];
+    existing.push({
+      studentId: studentRow.id,
+      studentName,
+      rowNumber,
+      guardianName,
+    });
+    guardianEmailToStudents.set(guardianEmail, existing);
+  }
+
+  const guardianCredentials: GuardianCredential[] = [];
+
+  for (const [guardianEmail, linkedStudentInfos] of guardianEmailToStudents) {
+    const firstInfo = linkedStudentInfos[0]!;
+    const guardianName = firstInfo.guardianName;
+    const linkedStudentNames = linkedStudentInfos.map((s) => s.studentName);
+
+    try {
+      // Check if app_user already exists with this email
+      const { data: existingAppUser } = await supabase
+        .from("app_users")
+        .select("id")
+        .eq("email", guardianEmail)
+        .maybeSingle();
+
+      let appUserId: string;
+
+      if (existingAppUser) {
+        // User already exists, just link them
+        appUserId = existingAppUser.id;
+        accountWarnings.push({
+          rowNumber: firstInfo.rowNumber,
+          message: `Guardian email "${guardianEmail}" already has an account. Linked to existing account.`,
+        });
+      } else {
+        // Create new auth user for guardian
+        const randomPassword = generateRandomPassword();
+
+        const { data: createdAuthUser, error: authError } =
+          await supabase.auth.admin.createUser({
+            email: guardianEmail,
+            password: randomPassword,
+            email_confirm: true,
+            user_metadata: {
+              full_name: guardianName,
+            },
+          });
+
+        if (authError || !createdAuthUser?.user) {
+          const status = (authError as { status?: number } | null)?.status;
+          const reason = status === 422 ? "email already in use" : "auth creation failed";
+          accountWarnings.push({
+            rowNumber: firstInfo.rowNumber,
+            message: `Could not create login for guardian "${guardianEmail}": ${reason}. No parent account created.`,
+          });
+          continue;
+        }
+
+        appUserId = createdAuthUser.user.id;
+
+        // Create app_users row with PARENT role
+        const { error: appUserError } = await supabase.from("app_users").insert({
+          id: appUserId,
+          email: guardianEmail,
+          full_name: guardianName,
+          roles: ["PARENT"],
+          primary_role: "PARENT",
+          is_active: true,
+        });
+
+        if (appUserError) {
+          console.error("[students/import] Failed to insert guardian app_users row", {
+            email: guardianEmail,
+            appUserError,
+          });
+          accountWarnings.push({
+            rowNumber: firstInfo.rowNumber,
+            message: `Could not create app user for guardian "${guardianEmail}". Login may not work.`,
+          });
+          continue;
+        }
+
+        guardianCredentials.push({
+          guardianName,
+          email: guardianEmail,
+          temporaryPassword: randomPassword,
+          linkedStudents: linkedStudentNames,
+        });
+      }
+
+      // Create student_guardians links for all linked students
+      for (const studentInfo of linkedStudentInfos) {
+        const { error: linkError } = await supabase
+          .from("student_guardians")
+          .upsert(
+            {
+              student_id: studentInfo.studentId,
+              app_user_id: appUserId,
+              relationship: "guardian",
+              is_primary: true,
+            },
+            { onConflict: "student_id,app_user_id" }
+          );
+
+        if (linkError) {
+          console.error("[students/import] Failed to create guardian student_guardians link", {
+            studentId: studentInfo.studentId,
+            appUserId,
+            linkError,
+          });
+          accountWarnings.push({
+            rowNumber: studentInfo.rowNumber,
+            message: `Could not link guardian "${guardianEmail}" to student "${studentInfo.studentName}". Event visibility may not work.`,
+          });
+        }
+      }
+    } catch (err) {
+      console.error("[students/import] Unexpected error creating guardian account", {
+        email: guardianEmail,
+        err,
+      });
+      accountWarnings.push({
+        rowNumber: firstInfo.rowNumber,
+        message: `Unexpected error creating guardian account for "${guardianEmail}".`,
+      });
+    }
+  }
+
   const importedStudents = studentRows.map((row, index) => {
     const source = resolvableRows[index]!.row;
     const fullName = `${row.first_name} ${row.last_name}`.trim();
@@ -366,6 +714,7 @@ export async function POST(request: NextRequest) {
       status: row.is_active ? "Active" : "Inactive",
       guardianPhone: row.guardian_phone,
       guardianEmail: row.guardian_email,
+      studentEmail: source.studentEmail,
     };
   });
 
@@ -378,8 +727,10 @@ export async function POST(request: NextRequest) {
   return formatSuccess(
     {
       summary,
-      errors: [],
+      errors: accountWarnings,
       students: importedStudents,
+      studentCredentials: credentials,
+      guardianCredentials,
     },
     200
   );

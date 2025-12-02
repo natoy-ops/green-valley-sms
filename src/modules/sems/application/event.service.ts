@@ -10,6 +10,8 @@
  * - Returns DTOs ready for API responses
  */
 
+import { ADMIN_ROLES } from "@/config/roles";
+import type { UserRole } from "@/core/auth/types";
 import type {
   IEventService,
   IEventRepository,
@@ -24,12 +26,19 @@ import type {
   EventListItemDto,
   EventListResponseDto,
   EventStatus,
+  ListEventsOptions,
   LevelRule,
   SectionRule,
   StudentRule,
   EventScannerConfig,
+  WorkflowActorContext,
+  EventLifecycleStatus,
+  EventWorkflowAction,
+  EventVisibility,
+  EventRegistrationMetadata,
+  EventRow,
+  EventWithFacilityRow,
 } from "../domain";
-import type { EventRepository } from "../infrastructure";
 
 /**
  * Custom error for validation failures.
@@ -41,6 +50,13 @@ export class ValidationError extends Error {
   ) {
     super(message);
     this.name = "ValidationError";
+  }
+}
+
+export class BusinessRuleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BusinessRuleError";
   }
 }
 
@@ -58,15 +74,31 @@ export class NotFoundError extends Error {
   }
 }
 
-/**
- * Options for listing events.
- */
-export interface ListEventsOptions {
-  page?: number;
-  pageSize?: number;
-  facilityId?: string;
-  searchTerm?: string;
+interface StudentAudienceContext {
+  studentId: string;
+  sectionId: string | null;
+  levelId: string | null;
 }
+
+const ALLOWED_VISIBILITY_VALUES: readonly EventVisibility[] = [
+  "internal",
+  "student",
+  "public",
+];
+
+const ORGANIZER_ROLE_SET = new Set<UserRole>(["TEACHER", "STAFF"]);
+
+const CRITICAL_FIELDS: ReadonlyArray<keyof UpdateEventDto> = [
+  "startDate",
+  "endDate",
+  "sessionConfig",
+  "audienceConfig",
+  "facilityId",
+  "capacityLimit",
+  "registrationRequired",
+  "registrationOpensAt",
+  "registrationClosesAt",
+];
 
 /**
  * Event service implementation.
@@ -92,189 +124,98 @@ export class EventService implements IEventService {
    * - Status (live, scheduled, completed)
    */
   async listEvents(options?: ListEventsOptions): Promise<EventListResponseDto> {
-    const repo = this.eventRepository as EventRepository;
     const page = options?.page ?? 1;
     const pageSize = options?.pageSize ?? 50;
 
-    // Fetch events with facility data
-    const { events: rawEvents, total } = await repo.findAll({
+    const { events: rawEvents, total } = await this.eventRepository.findAll({
+      ...options,
       page,
       pageSize,
-      facilityId: options?.facilityId,
-      searchTerm: options?.searchTerm,
     });
 
-    // Get total active students count for ALL_STUDENTS rules
-    const totalActiveStudents = await repo.countActiveStudents();
-
-    // Collect all unique level IDs from audience configs for batch lookup
-    const allLevelIds = new Set<string>();
-    for (const event of rawEvents) {
-      const config = event.target_audience as EventAudienceConfig;
-      if (config?.rules) {
-        for (const rule of config.rules) {
-          if (rule.kind === "LEVEL" && "levelIds" in rule) {
-            rule.levelIds.forEach((id) => allLevelIds.add(id));
-          }
-        }
-      }
-    }
-
-    // Batch fetch level names for audience summaries
-    const levelNames = await repo.getLevelNames(Array.from(allLevelIds));
-
-    // Transform each event to list item DTO
-    const events: EventListItemDto[] = await Promise.all(
-      rawEvents.map(async (event) => {
-        const audienceConfig = event.target_audience as EventAudienceConfig;
-        const sessionConfig = event.session_config as EventSessionConfig;
-        const scannerConfig = event.scanner_assignments as EventScannerConfig;
-        const startDate = event.start_date ?? event.event_date ?? "";
-        const endDate = event.end_date ?? event.start_date ?? event.event_date ?? "";
-
-        // Compute time range
-        const timeRange = this.computeTimeRange(sessionConfig);
-
-        // Compute audience summary
-        const audienceSummary = this.computeAudienceSummary(audienceConfig, levelNames);
-
-        // Compute scanner summary
-        const scannerIds = Array.isArray(scannerConfig?.scannerIds)
-          ? scannerConfig.scannerIds
-          : [];
-        let scannerSummary = "No scanners";
-        if (scannerIds.length === 1) {
-          scannerSummary = "1 scanner";
-        } else if (scannerIds.length > 1) {
-          scannerSummary = `${scannerIds.length} scanners`;
-        }
-
-        // Compute expected attendees
-        const expectedAttendees = await this.computeExpectedAttendees(
-          audienceConfig,
-          totalActiveStudents,
-          repo
-        );
-
-        // Get actual attendees
-        const actualAttendees = await repo.countEventAttendees(event.id);
-
-        // Compute status
-        const status = this.computeEventStatus(startDate, endDate, sessionConfig);
-
-        return {
-          id: event.id,
-          title: event.title,
-          timeRange,
-          venue: event.facilities?.name ?? null,
-          audienceSummary,
-          scannerSummary,
-          actualAttendees,
-          expectedAttendees,
-          status,
-          startDate,
-          endDate,
-        };
-      })
-    );
-
-    return {
-      events,
-      pagination: {
-        total,
-        page,
-        pageSize,
-        totalPages: Math.ceil(total / pageSize),
-      },
-    };
+    return this.buildPaginatedListResponse(rawEvents, page, pageSize, total);
   }
 
   async listScannerEvents(
     scannerId: string,
     options?: ListEventsOptions
   ): Promise<EventListResponseDto> {
-    const repo = this.eventRepository as EventRepository;
     const page = options?.page ?? 1;
     const pageSize = options?.pageSize ?? 50;
 
-    const { events: rawEvents, total } = await repo.findAllForScanner(scannerId, {
+    const { events: rawEvents, total } = await this.eventRepository.findAllForScanner(scannerId, {
       page,
       pageSize,
       facilityId: options?.facilityId,
       searchTerm: options?.searchTerm,
     });
 
-    const totalActiveStudents = await repo.countActiveStudents();
+    return this.buildPaginatedListResponse(rawEvents, page, pageSize, total);
+  }
 
-    const allLevelIds = new Set<string>();
-    for (const event of rawEvents) {
-      const config = event.target_audience as EventAudienceConfig;
-      if (config?.rules) {
-        for (const rule of config.rules) {
-          if (rule.kind === "LEVEL" && "levelIds" in rule) {
-            rule.levelIds.forEach((id) => allLevelIds.add(id));
-          }
-        }
-      }
+  async listOrganizerEvents(
+    actor: WorkflowActorContext,
+    options?: ListEventsOptions
+  ): Promise<EventListResponseDto> {
+    if (!this.isAdmin(actor) && !this.isOrganizer(actor)) {
+      throw new BusinessRuleError("You do not have permission to view organizer events.");
     }
 
-    const levelNames = await repo.getLevelNames(Array.from(allLevelIds));
-
-    const events: EventListItemDto[] = await Promise.all(
-      rawEvents.map(async (event) => {
-        const audienceConfig = event.target_audience as EventAudienceConfig;
-        const sessionConfig = event.session_config as EventSessionConfig;
-        const scannerConfig = event.scanner_assignments as EventScannerConfig;
-        const startDate = event.start_date ?? event.event_date ?? "";
-        const endDate = event.end_date ?? event.start_date ?? event.event_date ?? "";
-
-        const timeRange = this.computeTimeRange(sessionConfig);
-        const audienceSummary = this.computeAudienceSummary(audienceConfig, levelNames);
-
-        const scannerIds = Array.isArray(scannerConfig?.scannerIds)
-          ? scannerConfig.scannerIds
-          : [];
-        let scannerSummary = "No scanners";
-        if (scannerIds.length === 1) {
-          scannerSummary = "1 scanner";
-        } else if (scannerIds.length > 1) {
-          scannerSummary = `${scannerIds.length} scanners`;
-        }
-
-        const expectedAttendees = await this.computeExpectedAttendees(
-          audienceConfig,
-          totalActiveStudents,
-          repo
-        );
-
-        const actualAttendees = await repo.countEventAttendees(event.id);
-        const status = this.computeEventStatus(startDate, endDate, sessionConfig);
-
-        return {
-          id: event.id,
-          title: event.title,
-          timeRange,
-          venue: event.facilities?.name ?? null,
-          audienceSummary,
-          scannerSummary,
-          actualAttendees,
-          expectedAttendees,
-          status,
-          startDate,
-          endDate,
-        };
-      })
-    );
-
-    return {
-      events,
-      pagination: {
-        total,
-        page,
-        pageSize,
-        totalPages: Math.ceil(total / pageSize),
-      },
+    const page = options?.page ?? 1;
+    const pageSize = options?.pageSize ?? 50;
+    const baseOptions: ListEventsOptions = {
+      ...options,
+      page,
+      pageSize,
     };
+
+    if (this.isAdmin(actor)) {
+      const { events: rawEvents, total } = await this.eventRepository.findAll({
+        ...baseOptions,
+        ownerUserId: options?.ownerUserId,
+      });
+      return this.buildPaginatedListResponse(rawEvents, page, pageSize, total);
+    }
+
+    const { events: rawEvents, total } = await this.eventRepository.findAll({
+      ...baseOptions,
+      ownerOrInternalForUserId: actor.userId,
+    });
+
+    return this.buildPaginatedListResponse(rawEvents, page, pageSize, total);
+  }
+
+  async listStudentEvents(
+    actor: WorkflowActorContext,
+    options?: ListEventsOptions
+  ): Promise<EventListResponseDto> {
+    this.ensureActorHasRole(actor, "STUDENT", "Only students can view student events.");
+    const contexts = await this.eventRepository.getStudentContextsForUser(actor.userId);
+    return this.listAudienceScopedEvents(contexts, options, ["internal", "student", "public"]);
+  }
+
+  async listParentEvents(
+    actor: WorkflowActorContext,
+    options?: ListEventsOptions
+  ): Promise<EventListResponseDto> {
+    this.ensureActorHasRole(actor, "PARENT", "Only parents can view parent events.");
+    const contexts = await this.eventRepository.getStudentContextsForUser(actor.userId);
+    return this.listAudienceScopedEvents(contexts, options, ["internal", "student", "public"]);
+  }
+
+  async listPublicEvents(options?: ListEventsOptions): Promise<EventListResponseDto> {
+    const page = options?.page ?? 1;
+    const pageSize = options?.pageSize ?? 50;
+
+    const { events: rawEvents, total } = await this.eventRepository.findAll({
+      ...options,
+      page,
+      pageSize,
+      lifecycleStatuses: ["published"],
+      visibilities: ["public"],
+    });
+
+    return this.buildPaginatedListResponse(rawEvents, page, pageSize, total);
   }
 
   /**
@@ -390,7 +331,10 @@ export class EventService implements IEventService {
   private async computeExpectedAttendees(
     config: EventAudienceConfig,
     totalActiveStudents: number,
-    repo: EventRepository
+    repo: Pick<
+      IEventRepository,
+      "countStudentsByLevels" | "countStudentsBySections"
+    >
   ): Promise<number> {
     if (!config?.rules || config.rules.length === 0) {
       return 0;
@@ -486,20 +430,36 @@ export class EventService implements IEventService {
    * Create a new event with full validation.
    *
    * @param dto - Event creation data from the frontend
-   * @param createdBy - UUID of the authenticated user
+   * @param actor - Authenticated user context
    * @returns Created event DTO ready for API response
    *
    * @throws ValidationError if input data is invalid
    * @throws NotFoundError if facility doesn't exist
    */
-  async createEvent(dto: CreateEventDto, createdBy: string): Promise<EventDto> {
+  async createEvent(dto: CreateEventDto, actor: WorkflowActorContext): Promise<EventDto> {
     // Step 1: Validate input
     const validation = this.validateCreateEvent(dto);
     if (!validation.isValid || !validation.data) {
       throw new ValidationError("Invalid event data", validation.errors);
     }
 
-    const validatedDto = validation.data;
+    const validatedDto = { ...validation.data };
+    const now = new Date().toISOString();
+
+    validatedDto.ownerUserId = validatedDto.ownerUserId ?? actor.userId;
+    validatedDto.lifecycleStatus = "pending_approval";
+    validatedDto.submittedForApprovalAt = now;
+    validatedDto.approvedBy = null;
+    validatedDto.approvedAt = null;
+    validatedDto.approvalComment = null;
+    validatedDto.rejectedBy = null;
+    validatedDto.rejectedAt = null;
+    validatedDto.rejectionComment = null;
+    validatedDto.publishedAt = null;
+    validatedDto.completedAt = null;
+    validatedDto.cancelledBy = null;
+    validatedDto.cancelledAt = null;
+    validatedDto.cancellationReason = null;
 
     // Step 2: Check facility exists if provided
     if (validatedDto.facilityId) {
@@ -516,7 +476,7 @@ export class EventService implements IEventService {
     }
 
     // Step 3: Create event in database
-    const createdRow = await this.eventRepository.create(validatedDto, createdBy);
+    const createdRow = await this.eventRepository.create(validatedDto, actor.userId);
 
     // Step 4: Fetch with relations for complete DTO
     const eventDto = await this.eventRepository.findByIdWithFacility(createdRow.id);
@@ -538,14 +498,18 @@ export class EventService implements IEventService {
    * @throws ValidationError if input data is invalid
    * @throws NotFoundError if event or facility doesn't exist
    */
-  async updateEvent(dto: UpdateEventDto, updatedBy: string): Promise<EventDto> {
-    const repo = this.eventRepository as EventRepository;
-
+  async updateEvent(dto: UpdateEventDto, actor: WorkflowActorContext): Promise<EventDto> {
     // Step 1: Check event exists
     const existingEvent = await this.eventRepository.findById(dto.id);
     if (!existingEvent) {
       throw new NotFoundError("Event not found", "event", dto.id);
     }
+
+    if (!this.canManageEvent(existingEvent, actor)) {
+      throw new BusinessRuleError("You do not have permission to modify this event.");
+    }
+
+    this.assertEventMutable(existingEvent, dto.workflowAction, this.isAdmin(actor));
 
     // Step 2: Validate input
     const validation = this.validateUpdateEvent(dto);
@@ -570,7 +534,28 @@ export class EventService implements IEventService {
     }
 
     // Step 4: Update event in database
-    await repo.update(validatedDto, updatedBy);
+    const updatePayload: UpdateEventDto = { ...validatedDto };
+
+    this.normalizeRegistrationPayload(existingEvent, updatePayload);
+    this.assertRegistrationState(existingEvent, updatePayload);
+
+    if (dto.workflowAction) {
+      const workflowMutations = this.applyWorkflowAction(
+        existingEvent,
+        dto.workflowAction,
+        actor,
+        {
+          comment: dto.workflowComment,
+          reason: dto.actionReason,
+        },
+        updatePayload
+      );
+      Object.assign(updatePayload, workflowMutations);
+    } else if (this.shouldResetApproval(existingEvent, updatePayload)) {
+      Object.assign(updatePayload, this.buildApprovalResetPayload());
+    }
+
+    await this.eventRepository.update(updatePayload, actor.userId);
 
     // Step 5: Fetch with relations for complete DTO
     const eventDto = await this.eventRepository.findByIdWithFacility(dto.id);
@@ -632,6 +617,13 @@ export class EventService implements IEventService {
         ? typeof data.description === "string"
           ? data.description.trim()
           : ""
+        : undefined;
+
+    const posterImageUrl =
+      data.posterImageUrl === null
+        ? null
+        : typeof data.posterImageUrl === "string"
+        ? data.posterImageUrl.trim()
         : undefined;
 
     // Date validation (optional for update)
@@ -719,6 +711,83 @@ export class EventService implements IEventService {
       }
     }
 
+    // Visibility validation (optional)
+    let visibility: EventVisibility | undefined;
+    if (data.visibility !== undefined) {
+      const value = typeof data.visibility === "string" ? data.visibility.trim().toLowerCase() : "";
+      if (!ALLOWED_VISIBILITY_VALUES.includes(value as EventVisibility)) {
+        errors.push({
+          field: "visibility",
+          message: "Visibility must be one of: internal, student, public",
+          code: "INVALID_VALUE",
+        });
+      } else {
+        visibility = value as EventVisibility;
+      }
+    }
+
+    // Registration fields (optional)
+    let registrationRequired: boolean | undefined;
+    if (data.registrationRequired !== undefined) {
+      if (typeof data.registrationRequired !== "boolean") {
+        errors.push({
+          field: "registrationRequired",
+          message: "registrationRequired must be a boolean",
+          code: "INVALID_TYPE",
+        });
+      } else {
+        registrationRequired = data.registrationRequired;
+      }
+    }
+
+    const registrationOpensAt = this.normalizeTimestampField(
+      data.registrationOpensAt,
+      "registrationOpensAt",
+      errors
+    );
+    const registrationClosesAt = this.normalizeTimestampField(
+      data.registrationClosesAt,
+      "registrationClosesAt",
+      errors
+    );
+
+    if (registrationRequired === true) {
+      if (registrationOpensAt === undefined || registrationOpensAt === null) {
+        errors.push({
+          field: "registrationOpensAt",
+          message: "registrationOpensAt is required when registration is enabled",
+          code: "REQUIRED",
+        });
+      }
+      if (registrationClosesAt === undefined || registrationClosesAt === null) {
+        errors.push({
+          field: "registrationClosesAt",
+          message: "registrationClosesAt is required when registration is enabled",
+          code: "REQUIRED",
+        });
+      }
+    }
+
+    if (
+      registrationOpensAt &&
+      registrationClosesAt &&
+      registrationOpensAt !== null &&
+      registrationClosesAt !== null &&
+      registrationOpensAt > registrationClosesAt
+    ) {
+      errors.push({
+        field: "registrationClosesAt",
+        message: "registrationClosesAt must be after registrationOpensAt",
+        code: "INVALID_RANGE",
+      });
+    }
+
+    const capacityLimit = this.parseCapacityLimit(
+      data.capacityLimit,
+      "capacityLimit",
+      errors
+    );
+
     if (errors.length > 0) {
       return { isValid: false, errors };
     }
@@ -730,12 +799,18 @@ export class EventService implements IEventService {
         id,
         title: rawTitle,
         description: rawDescription,
+        posterImageUrl,
         startDate: rawStartDate,
         endDate: rawEndDate,
         facilityId: rawFacilityId,
         audienceConfig,
         scannerConfig,
         sessionConfig,
+        visibility,
+        registrationRequired,
+        registrationOpensAt,
+        registrationClosesAt,
+        capacityLimit,
       },
     };
   }
@@ -769,6 +844,9 @@ export class EventService implements IEventService {
     // === Description validation (optional) ===
     const rawDescription =
       typeof data.description === "string" ? data.description.trim() : undefined;
+
+    const rawPosterImageUrl =
+      typeof data.posterImageUrl === "string" ? data.posterImageUrl.trim() : undefined;
 
     // === Date validation ===
     const rawStartDate =
@@ -842,6 +920,69 @@ export class EventService implements IEventService {
       errors.push(...scannerConfigResult.errors);
     }
 
+    // === Visibility validation ===
+    const rawVisibility =
+      typeof data.visibility === "string" ? data.visibility.trim().toLowerCase() : "";
+    let visibility: EventVisibility | undefined;
+    if (!rawVisibility) {
+      errors.push({
+        field: "visibility",
+        message: "Visibility is required",
+        code: "REQUIRED",
+      });
+    } else if (!ALLOWED_VISIBILITY_VALUES.includes(rawVisibility as EventVisibility)) {
+      errors.push({
+        field: "visibility",
+        message: "Visibility must be one of: internal, student, public",
+        code: "INVALID_VALUE",
+      });
+    } else {
+      visibility = rawVisibility as EventVisibility;
+    }
+
+    // === Registration metadata ===
+    if (typeof data.registrationRequired !== "boolean") {
+      errors.push({
+        field: "registrationRequired",
+        message: "registrationRequired is required",
+        code: "REQUIRED",
+      });
+    }
+
+    const registrationRequired = data.registrationRequired === true;
+    const registrationOpensAt = this.normalizeTimestampField(
+      data.registrationOpensAt,
+      "registrationOpensAt",
+      errors,
+      { required: registrationRequired }
+    );
+    const registrationClosesAt = this.normalizeTimestampField(
+      data.registrationClosesAt,
+      "registrationClosesAt",
+      errors,
+      { required: registrationRequired }
+    );
+
+    if (
+      registrationOpensAt &&
+      registrationClosesAt &&
+      registrationOpensAt !== null &&
+      registrationClosesAt !== null &&
+      registrationOpensAt > registrationClosesAt
+    ) {
+      errors.push({
+        field: "registrationClosesAt",
+        message: "registrationClosesAt must be after registrationOpensAt",
+        code: "INVALID_RANGE",
+      });
+    }
+
+    const capacityLimit = this.parseCapacityLimit(
+      data.capacityLimit,
+      "capacityLimit",
+      errors
+    );
+
     if (errors.length > 0) {
       return { isValid: false, errors };
     }
@@ -852,12 +993,18 @@ export class EventService implements IEventService {
       data: {
         title: rawTitle,
         description: rawDescription,
+        posterImageUrl: rawPosterImageUrl,
         startDate: rawStartDate,
         endDate: rawEndDate,
         facilityId: rawFacilityId,
         audienceConfig: audienceConfigResult.data!,
         sessionConfig: sessionConfigResult.data!,
         scannerConfig: scannerConfigResult.data!,
+        visibility: visibility!,
+        registrationRequired,
+        registrationOpensAt: registrationOpensAt ?? null,
+        registrationClosesAt: registrationClosesAt ?? null,
+        capacityLimit: capacityLimit ?? null,
       },
     };
   }
@@ -1198,6 +1345,550 @@ export class EventService implements IEventService {
     };
   }
 
+  private canManageEvent(event: EventRow, actor: WorkflowActorContext): boolean {
+    if (this.isAdmin(actor)) {
+      return true;
+    }
+    return (
+      event.owner_user_id === actor.userId &&
+      actor.roles.some((role) => ORGANIZER_ROLE_SET.has(role))
+    );
+  }
+
+  private isAdmin(actor: WorkflowActorContext): boolean {
+    return actor.roles.some((role) => ADMIN_ROLES.includes(role));
+  }
+
+  private isOrganizer(actor: WorkflowActorContext): boolean {
+    return actor.roles.some((role) => ORGANIZER_ROLE_SET.has(role));
+  }
+
+  private ensureActorHasRole(
+    actor: WorkflowActorContext,
+    requiredRole: UserRole,
+    errorMessage: string
+  ): void {
+    if (!actor.roles.includes(requiredRole)) {
+      throw new BusinessRuleError(errorMessage);
+    }
+  }
+
+  private async listAudienceScopedEvents(
+    contexts: StudentAudienceContext[],
+    options: ListEventsOptions | undefined,
+    visibilities: EventVisibility[]
+  ): Promise<EventListResponseDto> {
+    const page = options?.page ?? 1;
+    const pageSize = options?.pageSize ?? 50;
+
+    if (!contexts || contexts.length === 0) {
+      return this.buildPaginatedListResponse([], page, pageSize, 0);
+    }
+
+    const { events: rawEvents } = await this.eventRepository.findAll({
+      ...options,
+      page: 1,
+      pageSize: page * pageSize,
+      lifecycleStatuses: ["published"],
+      visibilities,
+      disablePagination: true,
+    });
+
+    const eligibleEvents = rawEvents.filter((event) =>
+      this.eventMatchesContexts(event.target_audience as EventAudienceConfig, contexts)
+    );
+
+    const total = eligibleEvents.length;
+    const offset = (page - 1) * pageSize;
+    const pagedEvents = eligibleEvents.slice(offset, offset + pageSize);
+
+    return this.buildPaginatedListResponse(pagedEvents, page, pageSize, total);
+  }
+
+  private eventMatchesContexts(
+    audienceConfig: EventAudienceConfig,
+    contexts: StudentAudienceContext[]
+  ): boolean {
+    if (!audienceConfig?.rules || audienceConfig.rules.length === 0) {
+      return false;
+    }
+
+    return contexts.some((context) => this.isContextEligible(audienceConfig, context));
+  }
+
+  private isContextEligible(
+    audienceConfig: EventAudienceConfig,
+    context: StudentAudienceContext
+  ): boolean {
+    const includeRules = audienceConfig.rules.filter((rule) => rule.effect === "include");
+    const excludeRules = audienceConfig.rules.filter((rule) => rule.effect === "exclude");
+
+    const isIncluded = includeRules.some((rule) => this.ruleMatchesContext(rule, context));
+    if (!isIncluded) {
+      return false;
+    }
+
+    const isExcluded = excludeRules.some((rule) => this.ruleMatchesContext(rule, context));
+    return !isExcluded;
+  }
+
+  private ruleMatchesContext(rule: AudienceRule, context: StudentAudienceContext): boolean {
+    switch (rule.kind) {
+      case "ALL_STUDENTS":
+        return true;
+      case "LEVEL":
+        return !!context.levelId && rule.levelIds?.includes(context.levelId);
+      case "SECTION":
+        return !!context.sectionId && rule.sectionIds?.includes(context.sectionId);
+      case "STUDENT":
+        return rule.studentIds?.includes(context.studentId) ?? false;
+      default:
+        return false;
+    }
+  }
+
+  private async buildPaginatedListResponse(
+    rawEvents: EventWithFacilityRow[],
+    page: number,
+    pageSize: number,
+    total: number
+  ): Promise<EventListResponseDto> {
+    if (rawEvents.length === 0) {
+      return {
+        events: [],
+        pagination: {
+          total,
+          page,
+          pageSize,
+          totalPages: Math.ceil(total / pageSize) || 1,
+        },
+      };
+    }
+
+    const totalActiveStudents = await this.eventRepository.countActiveStudents();
+    const allLevelIds = new Set<string>();
+
+    for (const event of rawEvents) {
+      const config = event.target_audience as EventAudienceConfig;
+      if (config?.rules) {
+        for (const rule of config.rules) {
+          if (rule.kind === "LEVEL") {
+            (rule.levelIds ?? []).forEach((id) => allLevelIds.add(id));
+          }
+        }
+      }
+    }
+
+    const levelNames = await this.eventRepository.getLevelNames(Array.from(allLevelIds));
+
+    const events: EventListItemDto[] = await Promise.all(
+      rawEvents.map(async (event) => {
+        const audienceConfig = event.target_audience as EventAudienceConfig;
+        const sessionConfig = event.session_config as EventSessionConfig;
+        const scannerConfig = event.scanner_assignments as EventScannerConfig;
+        const startDate = event.start_date ?? event.event_date ?? "";
+        const endDate = event.end_date ?? event.start_date ?? event.event_date ?? "";
+
+        const timeRange = this.computeTimeRange(sessionConfig);
+        const audienceSummary = this.computeAudienceSummary(audienceConfig, levelNames);
+
+        const scannerIds = Array.isArray(scannerConfig?.scannerIds)
+          ? scannerConfig.scannerIds
+          : [];
+        const scannerSummary =
+          scannerIds.length === 0
+            ? "No scanners"
+            : scannerIds.length === 1
+            ? "1 scanner"
+            : `${scannerIds.length} scanners`;
+
+        const expectedAttendees = await this.computeExpectedAttendees(
+          audienceConfig,
+          totalActiveStudents,
+          this.eventRepository
+        );
+        const actualAttendees = await this.eventRepository.countEventAttendees(event.id);
+        const status = this.computeEventStatus(startDate, endDate, sessionConfig);
+
+        return {
+          id: event.id,
+          title: event.title,
+          timeRange,
+          venue: event.facilities?.name ?? null,
+          description: event.description ?? null,
+          audienceSummary,
+          scannerSummary,
+          actualAttendees,
+          expectedAttendees,
+          status,
+          startDate,
+          endDate,
+          lifecycleStatus: event.lifecycle_status,
+          visibility: event.visibility,
+          posterImageUrl: event.poster_image_url ?? null,
+        } as EventListItemDto;
+      })
+    );
+
+    return {
+      events,
+      pagination: {
+        total,
+        page,
+        pageSize,
+        totalPages: Math.ceil(total / pageSize) || 1,
+      },
+    };
+  }
+
+  private assertEventMutable(
+    event: EventRow,
+    action: EventWorkflowAction | undefined,
+    actorIsAdmin: boolean
+  ): void {
+    if (event.lifecycle_status === "completed" || event.lifecycle_status === "cancelled") {
+      throw new BusinessRuleError("Completed or cancelled events can no longer be modified.");
+    }
+
+    if (!action) {
+      if (event.lifecycle_status === "published") {
+        throw new BusinessRuleError(
+          "Published events require workflow actions (complete/cancel) for changes."
+        );
+      }
+
+      if (event.lifecycle_status === "pending_approval" && !actorIsAdmin) {
+        throw new BusinessRuleError("Only administrators can edit events pending approval.");
+      }
+    }
+  }
+
+  private applyWorkflowAction(
+    event: EventRow,
+    action: EventWorkflowAction,
+    actor: WorkflowActorContext,
+    options?: { comment?: string | null; reason?: string | null },
+    pendingUpdates?: UpdateEventDto
+  ): Partial<UpdateEventDto> {
+    const now = new Date().toISOString();
+
+    switch (action) {
+      case "SUBMIT_FOR_APPROVAL": {
+        if (event.lifecycle_status !== "draft") {
+          throw new BusinessRuleError("Only draft events can be submitted for approval.");
+        }
+        if (!this.isAdmin(actor) && event.owner_user_id !== actor.userId) {
+          throw new BusinessRuleError("You are not allowed to submit this event.");
+        }
+        return {
+          lifecycleStatus: "pending_approval",
+          submittedForApprovalAt: now,
+          rejectedBy: null,
+          rejectedAt: null,
+          rejectionComment: null,
+        };
+      }
+      case "APPROVE": {
+        if (event.lifecycle_status !== "pending_approval") {
+          throw new BusinessRuleError("Only pending events can be approved.");
+        }
+        if (!this.isAdmin(actor)) {
+          throw new BusinessRuleError("Only administrators can approve events.");
+        }
+        return {
+          lifecycleStatus: "approved",
+          approvedBy: actor.userId,
+          approvedAt: now,
+          approvalComment: options?.comment ?? null,
+          rejectedBy: null,
+          rejectedAt: null,
+          rejectionComment: null,
+        };
+      }
+      case "REJECT": {
+        if (event.lifecycle_status !== "pending_approval") {
+          throw new BusinessRuleError("Only pending events can be rejected.");
+        }
+        if (!this.isAdmin(actor)) {
+          throw new BusinessRuleError("Only administrators can reject events.");
+        }
+        if (!options?.comment || options.comment.trim().length === 0) {
+          throw new BusinessRuleError("A rejection comment is required.");
+        }
+        return {
+          lifecycleStatus: "draft",
+          rejectedBy: actor.userId,
+          rejectedAt: now,
+          rejectionComment: options.comment,
+          approvedBy: null,
+          approvedAt: null,
+          approvalComment: null,
+          submittedForApprovalAt: null,
+        };
+      }
+      case "PUBLISH": {
+        if (event.lifecycle_status !== "approved") {
+          throw new BusinessRuleError("Only approved events can be published.");
+        }
+        if (!this.isAdmin(actor)) {
+          throw new BusinessRuleError("Only administrators can publish events.");
+        }
+        this.assertPublishPreconditions(event, pendingUpdates);
+        return {
+          lifecycleStatus: "published",
+          publishedAt: now,
+        };
+      }
+      case "COMPLETE": {
+        if (event.lifecycle_status !== "published") {
+          throw new BusinessRuleError("Only published events can be completed.");
+        }
+        if (!this.isAdmin(actor)) {
+          throw new BusinessRuleError("Only administrators can complete events.");
+        }
+        return {
+          lifecycleStatus: "completed",
+          completedAt: now,
+        };
+      }
+      case "CANCEL": {
+        if (!this.isAdmin(actor)) {
+          throw new BusinessRuleError("Only administrators can cancel events.");
+        }
+        if (event.lifecycle_status === "completed" || event.lifecycle_status === "cancelled") {
+          throw new BusinessRuleError("This event can no longer be cancelled.");
+        }
+        const cancellationReason = options?.reason?.trim();
+        if (!cancellationReason) {
+          throw new BusinessRuleError("A cancellation reason is required.");
+        }
+        return {
+          lifecycleStatus: "cancelled",
+          cancelledBy: actor.userId,
+          cancelledAt: now,
+          cancellationReason,
+        };
+      }
+      default:
+        throw new BusinessRuleError(`Unsupported workflow action: ${action}`);
+    }
+  }
+
+  private normalizeRegistrationPayload(event: EventRow, payload: UpdateEventDto): void {
+    const registrationRequired =
+      payload.registrationRequired ?? event.registration_required;
+
+    if (!registrationRequired) {
+      payload.registrationOpensAt = null;
+      payload.registrationClosesAt = null;
+      payload.capacityLimit = null;
+    }
+  }
+
+  private getFinalRegistrationState(
+    event: EventRow,
+    updates?: UpdateEventDto
+  ): {
+    required: boolean;
+    registrationOpensAt: string | null;
+    registrationClosesAt: string | null;
+    capacityLimit: number | null;
+  } {
+    const required = updates?.registrationRequired ?? event.registration_required;
+
+    const registrationOpensAt =
+      updates?.registrationOpensAt !== undefined
+        ? updates.registrationOpensAt
+        : event.registration_opens_at;
+
+    const registrationClosesAt =
+      updates?.registrationClosesAt !== undefined
+        ? updates.registrationClosesAt
+        : event.registration_closes_at;
+
+    const capacityLimit =
+      updates?.capacityLimit !== undefined
+        ? updates.capacityLimit
+        : event.capacity_limit;
+
+    return {
+      required,
+      registrationOpensAt: registrationOpensAt ?? null,
+      registrationClosesAt: registrationClosesAt ?? null,
+      capacityLimit: capacityLimit ?? null,
+    };
+  }
+
+  private assertRegistrationState(event: EventRow, updates: UpdateEventDto): void {
+    const state = this.getFinalRegistrationState(event, updates);
+
+    if (!state.required) {
+      return;
+    }
+
+    if (!state.registrationOpensAt || !state.registrationClosesAt) {
+      throw new BusinessRuleError(
+        "Registration window must be provided when registration is enabled."
+      );
+    }
+
+    const opensAt = new Date(state.registrationOpensAt).getTime();
+    const closesAt = new Date(state.registrationClosesAt).getTime();
+
+    if (Number.isNaN(opensAt) || Number.isNaN(closesAt) || opensAt >= closesAt) {
+      throw new BusinessRuleError(
+        "registrationClosesAt must be after registrationOpensAt."
+      );
+    }
+
+    if (
+      state.capacityLimit !== null &&
+      state.capacityLimit !== undefined &&
+      state.capacityLimit <= 0
+    ) {
+      throw new BusinessRuleError(
+        "capacityLimit must be a positive integer when provided."
+      );
+    }
+  }
+
+  private assertPublishPreconditions(
+    event: EventRow,
+    pendingUpdates?: UpdateEventDto
+  ): void {
+    const startDate =
+      pendingUpdates?.startDate ??
+      event.start_date ??
+      event.event_date ??
+      null;
+
+    if (!startDate) {
+      throw new BusinessRuleError(
+        "Events must have a start date before they can be published."
+      );
+    }
+
+    const registrationState = this.getFinalRegistrationState(
+      event,
+      pendingUpdates
+    );
+
+    if (!registrationState.required) {
+      return;
+    }
+
+    if (
+      !registrationState.registrationOpensAt ||
+      !registrationState.registrationClosesAt
+    ) {
+      throw new BusinessRuleError(
+        "Registration window must be defined before publishing events that require registration."
+      );
+    }
+
+    const opensAt = new Date(registrationState.registrationOpensAt).getTime();
+    const closesAt = new Date(registrationState.registrationClosesAt).getTime();
+
+    if (Number.isNaN(opensAt) || Number.isNaN(closesAt) || opensAt >= closesAt) {
+      throw new BusinessRuleError(
+        "registrationClosesAt must be after registrationOpensAt."
+      );
+    }
+
+    if (
+      registrationState.capacityLimit !== null &&
+      registrationState.capacityLimit !== undefined &&
+      registrationState.capacityLimit <= 0
+    ) {
+      throw new BusinessRuleError(
+        "capacityLimit must be a positive integer when provided."
+      );
+    }
+  }
+
+  private shouldResetApproval(event: EventRow, payload: UpdateEventDto): boolean {
+    if (event.lifecycle_status !== "approved") {
+      return false;
+    }
+    return CRITICAL_FIELDS.some((field) => payload[field] !== undefined);
+  }
+
+  private buildApprovalResetPayload(): Partial<UpdateEventDto> {
+    const now = new Date().toISOString();
+    return {
+      lifecycleStatus: "pending_approval",
+      approvedBy: null,
+      approvedAt: null,
+      approvalComment: null,
+      rejectedBy: null,
+      rejectedAt: null,
+      rejectionComment: null,
+      submittedForApprovalAt: now,
+      publishedAt: null,
+    };
+  }
+
+  private normalizeTimestampField(
+    value: unknown,
+    field: string,
+    errors: ValidationErrorDetail[],
+    options?: { required?: boolean }
+  ): string | null | undefined {
+    if (value === undefined) {
+      if (options?.required) {
+        errors.push({ field, message: `${field} is required`, code: "REQUIRED" });
+      }
+      return undefined;
+    }
+
+    if (value === null || value === "") {
+      return null;
+    }
+
+    if (typeof value === "string" && this.isValidDateTimeString(value)) {
+      return value;
+    }
+
+    errors.push({
+      field,
+      message: `${field} must be an ISO8601 timestamp`,
+      code: "INVALID_FORMAT",
+    });
+    return undefined;
+  }
+
+  private parseCapacityLimit(
+    value: unknown,
+    field: string,
+    errors: ValidationErrorDetail[]
+  ): number | null | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+
+    if (value === null || value === "") {
+      return null;
+    }
+
+    const numericValue =
+      typeof value === "number"
+        ? value
+        : typeof value === "string"
+        ? Number(value)
+        : NaN;
+
+    if (!Number.isInteger(numericValue) || numericValue <= 0) {
+      errors.push({
+        field,
+        message: "capacityLimit must be a positive integer",
+        code: "INVALID_VALUE",
+      });
+      return undefined;
+    }
+
+    return numericValue;
+  }
+
   /**
    * Delete one or more events by ID.
    *
@@ -1237,8 +1928,7 @@ export class EventService implements IEventService {
       throw new ValidationError("Invalid event IDs", errors);
     }
 
-    const repo = this.eventRepository as EventRepository;
-    const deletedCount = await repo.deleteManyByIds(normalizedIds);
+    const deletedCount = await this.eventRepository.deleteManyByIds(normalizedIds);
     return deletedCount;
   }
 
@@ -1258,6 +1948,11 @@ export class EventService implements IEventService {
    */
   private isValidTimeString(value: string): boolean {
     return /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+  }
+
+  private isValidDateTimeString(value: string): boolean {
+    const date = new Date(value);
+    return !Number.isNaN(date.getTime());
   }
 
   /**

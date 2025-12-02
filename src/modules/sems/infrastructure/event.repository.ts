@@ -18,32 +18,12 @@ import type {
   EventAudienceConfig,
   EventSessionConfig,
   EventScannerConfig,
+  EventLifecycleStatus,
+  EventVisibility,
+  EventWithFacilityRow,
+  StudentAudienceContext,
+  ListEventsOptions,
 } from "../domain";
-
-/**
- * Raw database row type for events with joined facility data.
- */
-interface EventWithFacilityRow {
-  id: string;
-  title: string;
-  description: string | null;
-  event_date: string | null;
-  start_date: string | null;
-  end_date: string | null;
-  facility_id: string | null;
-  target_audience: EventAudienceConfig;
-  session_config: EventSessionConfig;
-  scanner_assignments: EventScannerConfig;
-  created_by: string | null;
-  created_at: string;
-  updated_by: string | null;
-  updated_at: string | null;
-  facilities: {
-    id: string;
-    name: string;
-    location_identifier: string;
-  } | null;
-}
 
 /**
  * Maps a database row to an EventDto for API responses.
@@ -56,6 +36,7 @@ function mapRowToDto(row: EventWithFacilityRow): EventDto {
     id: row.id,
     title: row.title,
     description: row.description,
+    posterImageUrl: row.poster_image_url,
     startDate: row.start_date ?? row.event_date ?? "",
     endDate: row.end_date ?? row.start_date ?? row.event_date ?? "",
     facility: row.facilities
@@ -68,11 +49,50 @@ function mapRowToDto(row: EventWithFacilityRow): EventDto {
     audienceConfig: row.target_audience,
     sessionConfig: row.session_config,
     scannerConfig: row.scanner_assignments,
+    lifecycleStatus: row.lifecycle_status,
+    ownerUserId: row.owner_user_id,
+    visibility: row.visibility,
+    registration: {
+      registrationRequired: row.registration_required,
+      registrationOpensAt: row.registration_opens_at,
+      registrationClosesAt: row.registration_closes_at,
+      capacityLimit: row.capacity_limit,
+    },
+    submittedForApprovalAt: row.submitted_for_approval_at,
+    approvedBy: row.approved_by,
+    approvedAt: row.approved_at,
+    approvalComment: row.approval_comment,
+    rejectedBy: row.rejected_by,
+    rejectedAt: row.rejected_at,
+    rejectionComment: row.rejection_comment,
+    publishedAt: row.published_at,
+    completedAt: row.completed_at,
+    cancelledBy: row.cancelled_by,
+    cancelledAt: row.cancelled_at,
+    cancellationReason: row.cancellation_reason,
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
+
+type StudentGuardianRow = {
+  student_id: string;
+  students: {
+    section_id: string | null;
+    sections: {
+      level_id: string | null;
+    } | null;
+  } | null;
+};
+
+type RawStudentGuardianRow = {
+  student_id: string;
+  students: Array<{
+    section_id: string | null;
+    sections: Array<{ level_id: string | null }>;
+  }>;
+};
 
 /**
  * Supabase implementation of the Event repository.
@@ -96,12 +116,32 @@ export class EventRepository implements IEventRepository {
     const insertPayload = {
       title: dto.title,
       description: dto.description ?? null,
+      poster_image_url: dto.posterImageUrl ?? null,
       start_date: dto.startDate,
       end_date: dto.endDate,
       facility_id: dto.facilityId ?? null,
       target_audience: dto.audienceConfig,
       session_config: dto.sessionConfig,
       scanner_assignments: dto.scannerConfig,
+      visibility: dto.visibility,
+      registration_required: dto.registrationRequired,
+      registration_opens_at: dto.registrationOpensAt ?? null,
+      registration_closes_at: dto.registrationClosesAt ?? null,
+      capacity_limit: dto.capacityLimit ?? null,
+      owner_user_id: dto.ownerUserId ?? createdBy,
+      lifecycle_status: dto.lifecycleStatus ?? "draft",
+      submitted_for_approval_at: dto.submittedForApprovalAt ?? null,
+      approved_by: dto.approvedBy ?? null,
+      approved_at: dto.approvedAt ?? null,
+      approval_comment: dto.approvalComment ?? null,
+      rejected_by: dto.rejectedBy ?? null,
+      rejected_at: dto.rejectedAt ?? null,
+      rejection_comment: dto.rejectionComment ?? null,
+      published_at: dto.publishedAt ?? null,
+      completed_at: dto.completedAt ?? null,
+      cancelled_by: dto.cancelledBy ?? null,
+      cancelled_at: dto.cancelledAt ?? null,
+      cancellation_reason: dto.cancellationReason ?? null,
       created_by: createdBy,
     };
 
@@ -113,6 +153,7 @@ export class EventRepository implements IEventRepository {
         id,
         title,
         description,
+        poster_image_url,
         event_date,
         start_date,
         end_date,
@@ -120,6 +161,25 @@ export class EventRepository implements IEventRepository {
         target_audience,
         session_config,
         scanner_assignments,
+        visibility,
+        registration_required,
+        registration_opens_at,
+        registration_closes_at,
+        capacity_limit,
+        owner_user_id,
+        lifecycle_status,
+        submitted_for_approval_at,
+        approved_by,
+        approved_at,
+        approval_comment,
+        rejected_by,
+        rejected_at,
+        rejection_comment,
+        published_at,
+        completed_at,
+        cancelled_by,
+        cancelled_at,
+        cancellation_reason,
         created_by,
         created_at,
         updated_by,
@@ -161,6 +221,9 @@ export class EventRepository implements IEventRepository {
     if (dto.description !== undefined) {
       updatePayload.description = dto.description;
     }
+    if (dto.posterImageUrl !== undefined) {
+      updatePayload.poster_image_url = dto.posterImageUrl;
+    }
     if (dto.startDate !== undefined) {
       updatePayload.start_date = dto.startDate;
     }
@@ -179,6 +242,63 @@ export class EventRepository implements IEventRepository {
     if (dto.scannerConfig !== undefined) {
       updatePayload.scanner_assignments = dto.scannerConfig;
     }
+    if (dto.visibility !== undefined) {
+      updatePayload.visibility = dto.visibility;
+    }
+    if (dto.registrationRequired !== undefined) {
+      updatePayload.registration_required = dto.registrationRequired;
+    }
+    if (dto.registrationOpensAt !== undefined) {
+      updatePayload.registration_opens_at = dto.registrationOpensAt ?? null;
+    }
+    if (dto.registrationClosesAt !== undefined) {
+      updatePayload.registration_closes_at = dto.registrationClosesAt ?? null;
+    }
+    if (dto.capacityLimit !== undefined) {
+      updatePayload.capacity_limit = dto.capacityLimit ?? null;
+    }
+    if (dto.ownerUserId !== undefined) {
+      updatePayload.owner_user_id = dto.ownerUserId;
+    }
+    if (dto.lifecycleStatus !== undefined) {
+      updatePayload.lifecycle_status = dto.lifecycleStatus;
+    }
+    if (dto.submittedForApprovalAt !== undefined) {
+      updatePayload.submitted_for_approval_at = dto.submittedForApprovalAt;
+    }
+    if (dto.approvedBy !== undefined) {
+      updatePayload.approved_by = dto.approvedBy;
+    }
+    if (dto.approvedAt !== undefined) {
+      updatePayload.approved_at = dto.approvedAt;
+    }
+    if (dto.approvalComment !== undefined) {
+      updatePayload.approval_comment = dto.approvalComment;
+    }
+    if (dto.rejectedBy !== undefined) {
+      updatePayload.rejected_by = dto.rejectedBy;
+    }
+    if (dto.rejectedAt !== undefined) {
+      updatePayload.rejected_at = dto.rejectedAt;
+    }
+    if (dto.rejectionComment !== undefined) {
+      updatePayload.rejection_comment = dto.rejectionComment;
+    }
+    if (dto.publishedAt !== undefined) {
+      updatePayload.published_at = dto.publishedAt;
+    }
+    if (dto.completedAt !== undefined) {
+      updatePayload.completed_at = dto.completedAt;
+    }
+    if (dto.cancelledBy !== undefined) {
+      updatePayload.cancelled_by = dto.cancelledBy;
+    }
+    if (dto.cancelledAt !== undefined) {
+      updatePayload.cancelled_at = dto.cancelledAt;
+    }
+    if (dto.cancellationReason !== undefined) {
+      updatePayload.cancellation_reason = dto.cancellationReason;
+    }
 
     const { data, error } = await this.supabase
       .from("events")
@@ -189,6 +309,7 @@ export class EventRepository implements IEventRepository {
         id,
         title,
         description,
+        poster_image_url,
         event_date,
         start_date,
         end_date,
@@ -196,6 +317,25 @@ export class EventRepository implements IEventRepository {
         target_audience,
         session_config,
         scanner_assignments,
+        visibility,
+        registration_required,
+        registration_opens_at,
+        registration_closes_at,
+        capacity_limit,
+        owner_user_id,
+        lifecycle_status,
+        submitted_for_approval_at,
+        approved_by,
+        approved_at,
+        approval_comment,
+        rejected_by,
+        rejected_at,
+        rejection_comment,
+        published_at,
+        completed_at,
+        cancelled_by,
+        cancelled_at,
+        cancellation_reason,
         created_by,
         created_at,
         updated_by,
@@ -205,9 +345,6 @@ export class EventRepository implements IEventRepository {
       .single<EventRow>();
 
     if (error) {
-      if (error.code === "PGRST116") {
-        throw new Error(`Event not found: ${dto.id}`);
-      }
       console.error("[EventRepository.update] Database error:", error);
       throw new Error(`Failed to update event: ${error.message}`);
     }
@@ -233,6 +370,7 @@ export class EventRepository implements IEventRepository {
         id,
         title,
         description,
+        poster_image_url,
         event_date,
         start_date,
         end_date,
@@ -240,6 +378,25 @@ export class EventRepository implements IEventRepository {
         target_audience,
         session_config,
         scanner_assignments,
+        visibility,
+        registration_required,
+        registration_opens_at,
+        registration_closes_at,
+        capacity_limit,
+        owner_user_id,
+        lifecycle_status,
+        submitted_for_approval_at,
+        approved_by,
+        approved_at,
+        approval_comment,
+        rejected_by,
+        rejected_at,
+        rejection_comment,
+        published_at,
+        completed_at,
+        cancelled_by,
+        cancelled_at,
+        cancellation_reason,
         created_by,
         created_at,
         updated_by,
@@ -275,6 +432,7 @@ export class EventRepository implements IEventRepository {
         id,
         title,
         description,
+        poster_image_url,
         event_date,
         start_date,
         end_date,
@@ -282,6 +440,25 @@ export class EventRepository implements IEventRepository {
         target_audience,
         session_config,
         scanner_assignments,
+        visibility,
+        registration_required,
+        registration_opens_at,
+        registration_closes_at,
+        capacity_limit,
+        owner_user_id,
+        lifecycle_status,
+        submitted_for_approval_at,
+        approved_by,
+        approved_at,
+        approval_comment,
+        rejected_by,
+        rejected_at,
+        rejection_comment,
+        published_at,
+        completed_at,
+        cancelled_by,
+        cancelled_at,
+        cancellation_reason,
         created_by,
         created_at,
         updated_by,
@@ -342,12 +519,7 @@ export class EventRepository implements IEventRepository {
    * @param options - Query options (pagination, filters)
    * @returns Array of events with facility data
    */
-  async findAll(options?: {
-    page?: number;
-    pageSize?: number;
-    facilityId?: string;
-    searchTerm?: string;
-  }): Promise<{ events: EventWithFacilityRow[]; total: number }> {
+  async findAll(options?: ListEventsOptions): Promise<{ events: EventWithFacilityRow[]; total: number }> {
     const page = options?.page ?? 1;
     const pageSize = options?.pageSize ?? 50;
     const offset = (page - 1) * pageSize;
@@ -359,6 +531,7 @@ export class EventRepository implements IEventRepository {
         id,
         title,
         description,
+        poster_image_url,
         event_date,
         start_date,
         end_date,
@@ -366,6 +539,25 @@ export class EventRepository implements IEventRepository {
         target_audience,
         session_config,
         scanner_assignments,
+        lifecycle_status,
+        owner_user_id,
+        visibility,
+        registration_required,
+        registration_opens_at,
+        registration_closes_at,
+        capacity_limit,
+        submitted_for_approval_at,
+        approved_by,
+        approved_at,
+        approval_comment,
+        rejected_by,
+        rejected_at,
+        rejection_comment,
+        published_at,
+        completed_at,
+        cancelled_by,
+        cancelled_at,
+        cancellation_reason,
         created_by,
         created_at,
         updated_by,
@@ -378,8 +570,11 @@ export class EventRepository implements IEventRepository {
       `,
         { count: "exact" }
       )
-      .order("start_date", { ascending: false, nullsFirst: false })
-      .range(offset, offset + pageSize - 1);
+      .order("start_date", { ascending: false, nullsFirst: false });
+
+    if (!options?.disablePagination) {
+      query = query.range(offset, offset + pageSize - 1);
+    }
 
     // Apply filters
     if (options?.facilityId) {
@@ -388,6 +583,30 @@ export class EventRepository implements IEventRepository {
 
     if (options?.searchTerm) {
       query = query.ilike("title", `%${options.searchTerm}%`);
+    }
+
+    const ownerOrInternalForUserId = options?.ownerOrInternalForUserId;
+
+    if (options?.ownerUserId && !ownerOrInternalForUserId) {
+      query = query.eq("owner_user_id", options.ownerUserId);
+    }
+
+    if (ownerOrInternalForUserId) {
+      const orFilter = [`owner_user_id.eq.${ownerOrInternalForUserId}`, "visibility.eq.internal"].join(",");
+      query = query.or(orFilter);
+    }
+
+    if (options?.lifecycleStatuses && options.lifecycleStatuses.length > 0) {
+      query = query.in("lifecycle_status", options.lifecycleStatuses);
+    }
+
+    if (options?.excludeLifecycleStatuses && options.excludeLifecycleStatuses.length > 0) {
+      const excluded = options.excludeLifecycleStatuses.join(",");
+      query = query.not("lifecycle_status", "in", `(${excluded})`);
+    }
+
+    if (options?.visibilities && options.visibilities.length > 0) {
+      query = query.in("visibility", options.visibilities);
     }
     const { data, error, count } = await query;
 
@@ -436,6 +655,7 @@ export class EventRepository implements IEventRepository {
         id,
         title,
         description,
+        poster_image_url,
         event_date,
         start_date,
         end_date,
@@ -443,6 +663,25 @@ export class EventRepository implements IEventRepository {
         target_audience,
         session_config,
         scanner_assignments,
+        lifecycle_status,
+        owner_user_id,
+        visibility,
+        registration_required,
+        registration_opens_at,
+        registration_closes_at,
+        capacity_limit,
+        submitted_for_approval_at,
+        approved_by,
+        approved_at,
+        approval_comment,
+        rejected_by,
+        rejected_at,
+        rejection_comment,
+        published_at,
+        completed_at,
+        cancelled_by,
+        cancelled_at,
+        cancellation_reason,
         created_by,
         created_at,
         updated_by,
@@ -456,6 +695,7 @@ export class EventRepository implements IEventRepository {
         { count: "exact" }
       )
       .order("start_date", { ascending: false, nullsFirst: false })
+      .eq("lifecycle_status", "published")
       .range(offset, offset + pageSize - 1)
       .contains("scanner_assignments", { scannerIds: [scannerId] });
 
@@ -748,6 +988,48 @@ export class EventRepository implements IEventRepository {
     // Count unique student IDs
     const uniqueStudentIds = new Set(logs.map((log) => log.student_id));
     return uniqueStudentIds.size;
+  }
+
+  async getStudentContextsForUser(appUserId: string): Promise<StudentAudienceContext[]> {
+    if (!appUserId) {
+      return [];
+    }
+
+    const { data, error } = await this.supabase
+      .from("student_guardians")
+      .select(
+        `student_id, students:student_id ( section_id, sections:section_id ( level_id ) )`
+      )
+      .eq("app_user_id", appUserId);
+
+    if (error || !data) {
+      console.error("[EventRepository.getStudentContextsForUser] Error:", error);
+      return [];
+    }
+
+    const rawRows = data as RawStudentGuardianRow[];
+
+    return rawRows
+      .map(({ student_id, students }) => {
+        const student = students?.[0] ?? null;
+        const section = student?.sections?.[0] ?? null;
+        const normalized: StudentGuardianRow = {
+          student_id,
+          students: student
+            ? {
+                section_id: student.section_id,
+                sections: section ?? null,
+              }
+            : null,
+        };
+
+        return {
+          studentId: normalized.student_id,
+          sectionId: normalized.students?.section_id ?? null,
+          levelId: normalized.students?.sections?.level_id ?? null,
+        };
+      })
+      .filter((context) => Boolean(context.studentId));
   }
 
   /**

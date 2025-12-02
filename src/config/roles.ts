@@ -4,6 +4,7 @@ export const ALL_USER_ROLES: readonly UserRole[] = [
   "SUPER_ADMIN",
   "ADMIN",
   "SCANNER",
+  "STUDENT",
   "TEACHER",
   "STAFF",
   "PARENT",
@@ -17,10 +18,19 @@ export const ADMIN_SCANNER_ROLES: readonly UserRole[] = [
   "SCANNER",
 ] as const;
 
+export const ADMIN_TEACHER_ROLES: readonly UserRole[] = [
+  "SUPER_ADMIN",
+  "ADMIN",
+  "TEACHER",
+  "STAFF",
+] as const;
+
 export const SUPPORTED_APP_ROLES: readonly UserRole[] = [
   "SUPER_ADMIN",
   "ADMIN",
   "SCANNER",
+  "TEACHER",
+  "STAFF",
 ] as const;
 
 export function hasSupportedRole(roles: UserRole[]): boolean {

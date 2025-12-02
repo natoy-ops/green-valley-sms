@@ -60,7 +60,7 @@ const MODULES: ModuleConfig[] = [
     icon: TrendingUp,
     href: "/dashboard",
     status: "active",
-    allowedRoles: ["SUPER_ADMIN", "ADMIN"],
+    allowedRoles: ["SUPER_ADMIN", "ADMIN", "TEACHER", "STAFF"],
   },
   {
     id: "sems",
@@ -70,7 +70,7 @@ const MODULES: ModuleConfig[] = [
     icon: QrCode,
     href: "/sems",
     status: "active",
-    allowedRoles: ["SUPER_ADMIN", "ADMIN"],
+    allowedRoles: ["SUPER_ADMIN", "ADMIN", "TEACHER", "STAFF"],
   },
   {
     id: "sis",
@@ -80,7 +80,7 @@ const MODULES: ModuleConfig[] = [
     icon: Users,
     href: "/sis",
     status: "active",
-    allowedRoles: ["SUPER_ADMIN", "ADMIN"],
+    allowedRoles: ["SUPER_ADMIN", "ADMIN", "TEACHER"],
   },
   {
     id: "facilities",
@@ -90,7 +90,7 @@ const MODULES: ModuleConfig[] = [
     icon: Building2,
     href: "/facilities",
     status: "active",
-    allowedRoles: ["SUPER_ADMIN", "ADMIN"],
+    allowedRoles: ["SUPER_ADMIN", "ADMIN", "TEACHER", "STAFF"],
   },
   { id: "academic", name: "Academic Structure", shortName: "Academics", phase: "phase2", icon: School, href: "/dashboard/academic", status: "upcoming" },
   { id: "attendance", name: "Daily Attendance", shortName: "Attendance", phase: "phase2", icon: ClipboardCheck, href: "/dashboard/attendance", status: "upcoming" },
@@ -117,6 +117,11 @@ export default function DashboardShell({ children, mobileTitle, mobileDescriptio
   const [isMobile, setIsMobile] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const canManageUsers = hasRole(["SUPER_ADMIN", "ADMIN"]);
+  const shouldHideModules = hasRole(["SCANNER", "STUDENT", "PARENT"]);
+  const isStaffUser = hasRole(["STAFF"]);
+  const isStudent = hasRole(["STUDENT"]);
+  const isScanner = hasRole(["SCANNER"]);
+  const isParent = hasRole(["PARENT"]);
 
   useEffect(() => {
     const checkMobile = () => {
@@ -194,71 +199,207 @@ export default function DashboardShell({ children, mobileTitle, mobileDescriptio
             isCollapsed ? "px-2" : "px-3"
           }`}
         >
-          <div
-            className={`px-3 text-xs font-bold text-muted-foreground uppercase tracking-wider transition-all duration-300 origin-left ${
-              isCollapsed
-                ? "mt-0 h-0 py-0 opacity-0 -translate-x-2 overflow-hidden"
-                : "h-6 py-2 opacity-100 translate-x-0"
-            }`}
-          >
-            Modules
-          </div>
-          {MODULES.map((module) => {
-            const isActive = pathname === module.href;
-            const hasModuleAccess = !module.allowedRoles || hasRole(module.allowedRoles);
-            const isDisabled = module.status !== "active" || !hasModuleAccess;
-
-            return (
-              <button
-                key={module.id}
-                onClick={() => {
-                  if (!isDisabled) {
-                    router.push(module.href);
-                  }
-                }}
-                className={`w-full flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
-                  isCollapsed ? "justify-center gap-0" : "gap-3"
-                } ${
-                  isDisabled
-                    ? "text-muted-foreground/50 cursor-not-allowed opacity-60"
-                    : `group border ${
-                        isActive
-                          ? "bg-card text-primary shadow-sm border-primary/10"
-                          : "border-transparent text-muted-foreground hover:bg-accent hover:text-primary"
-                      }`
+          {!shouldHideModules && (
+            <>
+              <div
+                className={`px-3 text-xs font-bold text-muted-foreground uppercase tracking-wider transition-all duration-300 origin-left ${
+                  isCollapsed
+                    ? "mt-0 h-0 py-0 opacity-0 -translate-x-2 overflow-hidden"
+                    : "h-6 py-2 opacity-100 translate-x-0"
                 }`}
               >
-                <module.icon
+                Modules
+              </div>
+              {MODULES.filter((module) => {
+                // Hide Registry module for any staff user (primary or secondary role)
+                if (module.id === "sis" && isStaffUser) {
+                  return false;
+                }
+                return true;
+              }).map((module) => {
+                const isActive = pathname === module.href;
+                const hasModuleAccess = !module.allowedRoles || hasRole(module.allowedRoles);
+                const isDisabled = module.status !== "active" || !hasModuleAccess;
+
+                return (
+                  <button
+                    key={module.id}
+                    onClick={() => {
+                      if (!isDisabled) {
+                        router.push(module.href);
+                      }
+                    }}
+                    className={`w-full flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
+                      isCollapsed ? "justify-center gap-0" : "gap-3"
+                    } ${
+                      isDisabled
+                        ? "text-muted-foreground/50 cursor-not-allowed opacity-60"
+                        : `group border ${
+                            isActive
+                              ? "bg-card text-primary shadow-sm border-primary/10"
+                              : "border-transparent text-muted-foreground hover:bg-accent hover:text-primary"
+                          }`
+                    }`}
+                  >
+                    <module.icon
+                      className={`w-4 h-4 transition-colors ${
+                        !isDisabled
+                          ? isActive
+                            ? "text-primary"
+                            : "text-muted-foreground group-hover:text-primary"
+                          : ""
+                      }`}
+                    />
+                    <span
+                      className={`overflow-hidden text-left whitespace-nowrap transition-all duration-300 origin-left ml-0 ${
+                        isCollapsed
+                          ? "max-w-0 opacity-0 translate-x-2"
+                          : "max-w-[80px] opacity-100 translate-x-0 ml-2"
+                      }`}
+                    >
+                      {module.shortName}
+                    </span>
+                    {module.status === "upcoming" && !isCollapsed && (
+                      <span className="ml-auto text-[10px] bg-muted text-muted-foreground px-1.5 py-0.5 rounded-md font-semibold border border-border">
+                        Soon
+                      </span>
+                    )}
+                    {module.status === "active" && !hasModuleAccess && !isCollapsed && (
+                      <span className="ml-auto text-[10px] bg-destructive/10 text-destructive px-1.5 py-0.5 rounded-md font-semibold border border-destructive/30">
+                        Restricted
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </>
+          )}
+
+          {isStudent && (
+            <div className="mt-4 space-y-2">
+              <div
+                className={`px-3 text-xs font-bold text-muted-foreground uppercase tracking-wider transition-all duration-300 origin-left ${
+                  isCollapsed
+                    ? "mt-0 h-0 py-0 opacity-0 -translate-x-2 overflow-hidden"
+                    : "h-6 py-2 opacity-100 translate-x-0"
+                }`}
+              >
+                Student
+              </div>
+              <button
+                type="button"
+                onClick={() => router.push("/sems/student-events")}
+                className={`w-full flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
+                  isCollapsed ? "justify-center gap-0" : "gap-3"
+                } group border ${
+                  pathname === "/sems/student-events"
+                    ? "bg-card text-primary shadow-sm border-primary/10"
+                    : "border-transparent text-muted-foreground hover:bg-accent hover:text-primary"
+                }`}
+              >
+                <QrCode
                   className={`w-4 h-4 transition-colors ${
-                    !isDisabled
-                      ? isActive
-                        ? "text-primary"
-                        : "text-muted-foreground group-hover:text-primary"
-                      : ""
+                    pathname === "/sems/student-events"
+                      ? "text-primary"
+                      : "text-muted-foreground group-hover:text-primary"
                   }`}
                 />
                 <span
                   className={`overflow-hidden text-left whitespace-nowrap transition-all duration-300 origin-left ml-0 ${
                     isCollapsed
                       ? "max-w-0 opacity-0 translate-x-2"
-                      : "max-w-[80px] opacity-100 translate-x-0 ml-2"
+                      : "max-w-[120px] opacity-100 translate-x-0 ml-2"
                   }`}
                 >
-                  {module.shortName}
+                  My Events
                 </span>
-                {module.status === "upcoming" && !isCollapsed && (
-                  <span className="ml-auto text-[10px] bg-muted text-muted-foreground px-1.5 py-0.5 rounded-md font-semibold border border-border">
-                    Soon
-                  </span>
-                )}
-                {module.status === "active" && !hasModuleAccess && !isCollapsed && (
-                  <span className="ml-auto text-[10px] bg-destructive/10 text-destructive px-1.5 py-0.5 rounded-md font-semibold border border-destructive/30">
-                    Restricted
-                  </span>
-                )}
               </button>
-            );
-          })}
+            </div>
+          )}
+
+          {isScanner && (
+            <div className="mt-4 space-y-2">
+              <div
+                className={`px-3 text-xs font-bold text-muted-foreground uppercase tracking-wider transition-all duration-300 origin-left ${
+                  isCollapsed
+                    ? "mt-0 h-0 py-0 opacity-0 -translate-x-2 overflow-hidden"
+                    : "h-6 py-2 opacity-100 translate-x-0"
+                }`}
+              >
+                Scanner
+              </div>
+              <button
+                type="button"
+                onClick={() => router.push("/sems/scan")}
+                className={`w-full flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
+                  isCollapsed ? "justify-center gap-0" : "gap-3"
+                } group border ${
+                  pathname === "/sems/scan"
+                    ? "bg-card text-primary shadow-sm border-primary/10"
+                    : "border-transparent text-muted-foreground hover:bg-accent hover:text-primary"
+                }`}
+              >
+                <QrCode
+                  className={`w-4 h-4 transition-colors ${
+                    pathname === "/sems/scan"
+                      ? "text-primary"
+                      : "text-muted-foreground group-hover:text-primary"
+                  }`}
+                />
+                <span
+                  className={`overflow-hidden text-left whitespace-nowrap transition-all duration-300 origin-left ml-0 ${
+                    isCollapsed
+                      ? "max-w-0 opacity-0 translate-x-2"
+                      : "max-w-[120px] opacity-100 translate-x-0 ml-2"
+                  }`}
+                >
+                  Scan Event
+                </span>
+              </button>
+            </div>
+          )}
+
+          {isParent && (
+            <div className="mt-4 space-y-2">
+              <div
+                className={`px-3 text-xs font-bold text-muted-foreground uppercase tracking-wider transition-all duration-300 origin-left ${
+                  isCollapsed
+                    ? "mt-0 h-0 py-0 opacity-0 -translate-x-2 overflow-hidden"
+                    : "h-6 py-2 opacity-100 translate-x-0"
+                }`}
+              >
+                Parent
+              </div>
+              <button
+                type="button"
+                onClick={() => router.push("/sems/parent-events")}
+                className={`w-full flex items-center px-3 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
+                  isCollapsed ? "justify-center gap-0" : "gap-3"
+                } group border ${
+                  pathname === "/sems/parent-events"
+                    ? "bg-card text-primary shadow-sm border-primary/10"
+                    : "border-transparent text-muted-foreground hover:bg-accent hover:text-primary"
+                }`}
+              >
+                <QrCode
+                  className={`w-4 h-4 transition-colors ${
+                    pathname === "/sems/parent-events"
+                      ? "text-primary"
+                      : "text-muted-foreground group-hover:text-primary"
+                  }`}
+                />
+                <span
+                  className={`overflow-hidden text-left whitespace-nowrap transition-all duration-300 origin-left ml-0 ${
+                    isCollapsed
+                      ? "max-w-0 opacity-0 translate-x-2"
+                      : "max-w-[120px] opacity-100 translate-x-0 ml-2"
+                  }`}
+                >
+                  School Events
+                </span>
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="px-3 pb-4">

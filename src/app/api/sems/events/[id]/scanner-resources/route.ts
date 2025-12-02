@@ -206,6 +206,14 @@ export async function GET(
       return formatError(404, "NOT_FOUND", "Event not found.");
     }
 
+    if (event.lifecycleStatus !== "published") {
+      return formatError(
+        409,
+        "EVENT_NOT_ACTIVE",
+        "Scanner resources are only available while the event is published."
+      );
+    }
+
     const scannerIds = Array.isArray(event.scannerConfig?.scannerIds)
       ? event.scannerConfig.scannerIds
       : [];

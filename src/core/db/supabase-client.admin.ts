@@ -17,6 +17,14 @@ export function getAdminSupabaseClient(): SupabaseClient {
       persistSession: false,
       autoRefreshToken: false,
     },
+    db: {
+      schema: "public",
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`,
+      },
+    },
   });
 
   return adminClient;

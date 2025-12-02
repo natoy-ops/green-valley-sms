@@ -14,7 +14,16 @@ import type {
   CreateEventDto,
   EventDto,
   EventRow,
+  EventWithFacilityRow,
   ValidationResult,
+  UpdateEventDto,
+  WorkflowActorContext,
+  EventSessionConfig,
+  StudentAudienceContext,
+  EventListResponseDto,
+  EventVisibility,
+  EventLifecycleStatus,
+  ListEventsOptions,
 } from "./types";
 
 // ============================================================================
@@ -41,6 +50,11 @@ export interface IEventRepository {
   create(event: CreateEventDto, createdBy: string): Promise<EventRow>;
 
   /**
+   * Update an existing event.
+   */
+  update(event: UpdateEventDto, updatedBy: string): Promise<EventRow>;
+
+  /**
    * Find an event by its ID.
    *
    * @param id - UUID of the event
@@ -63,6 +77,55 @@ export interface IEventRepository {
    * @returns True if facility exists and is operational
    */
   facilityExists(facilityId: string): Promise<boolean>;
+
+  findAll(options?: ListEventsOptions): Promise<{ events: EventWithFacilityRow[]; total: number }>;
+
+  findAllForScanner(
+    scannerId: string,
+    options?: {
+      page?: number;
+      pageSize?: number;
+      facilityId?: string;
+      searchTerm?: string;
+    }
+  ): Promise<{ events: EventWithFacilityRow[]; total: number }>;
+
+  countActiveStudents(): Promise<number>;
+
+  countStudentsByLevels(levelIds: string[]): Promise<number>;
+
+  countStudentsBySections(sectionIds: string[]): Promise<number>;
+
+  getLevelNames(levelIds: string[]): Promise<Map<string, string>>;
+
+  findEventsInDateRange(
+    startDate: string,
+    endDate: string,
+    excludeEventId?: string
+  ): Promise<
+    Array<{
+      id: string;
+      title: string;
+      facilityId: string;
+      startDate: string;
+      endDate: string;
+      sessionConfig: EventSessionConfig;
+    }>
+  >;
+
+  getOperationalFacilities(): Promise<
+    Array<{
+      id: string;
+      name: string;
+      location: string;
+      imageUrl: string | null;
+      capacity: number | null;
+    }>
+  >;
+
+  countEventAttendees(eventId: string): Promise<number>;
+
+  getStudentContextsForUser(appUserId: string): Promise<StudentAudienceContext[]>;
 
   /**
    * Delete multiple events by their IDs.
@@ -90,7 +153,7 @@ export interface IEventService {
    * Create a new event with full validation.
    *
    * @param dto - Event creation data from the frontend
-   * @param createdBy - UUID of the authenticated user
+   * @param actor - Authenticated user context (id + roles)
    * @returns Created event DTO ready for API response
    *
    * @throws ValidationError if input data is invalid
@@ -105,7 +168,12 @@ export interface IEventService {
    * - Audience config has at least one include rule
    * - Session config has at least one session per date
    */
-  createEvent(dto: CreateEventDto, createdBy: string): Promise<EventDto>;
+  createEvent(dto: CreateEventDto, actor: WorkflowActorContext): Promise<EventDto>;
+
+  /**
+   * Update an existing event with validation and workflow enforcement.
+   */
+  updateEvent(dto: UpdateEventDto, actor: WorkflowActorContext): Promise<EventDto>;
 
   /**
    * Validate event creation input without persisting.
@@ -125,4 +193,21 @@ export interface IEventService {
    * @returns Number of events deleted
    */
   deleteEvents(ids: string[]): Promise<number>;
+
+  listOrganizerEvents(
+    actor: WorkflowActorContext,
+    options?: ListEventsOptions
+  ): Promise<EventListResponseDto>;
+
+  listStudentEvents(
+    actor: WorkflowActorContext,
+    options?: ListEventsOptions
+  ): Promise<EventListResponseDto>;
+
+  listParentEvents(
+    actor: WorkflowActorContext,
+    options?: ListEventsOptions
+  ): Promise<EventListResponseDto>;
+
+  listPublicEvents(options?: ListEventsOptions): Promise<EventListResponseDto>;
 }

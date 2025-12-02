@@ -1,0 +1,171 @@
+# Netlify Configuration for School Management System
+# This file defines the build settings, environment variables, and deployment configurations
+# for deploying the Next.js application to Netlify.
+
+[build]
+  # Specifies the command to build the Next.js application
+  # Clean ALL cache directories (including Netlify's .netlify directory) 
+  # to prevent false positive secret scanning of webpack cache
+  command = "rm -rf .next/cache .netlify/.next/cache && npm run build"
+  
+  # Directory where the build output is stored
+  # When using @netlify/plugin-nextjs, the plugin handles the publish directory
+  # Set to .next for Next.js builds (plugin will manage the actual deployment)
+  publish = ".next"
+  
+  # Node.js version requirement (must match package.json engines)
+  NODE_VERSION = "18.17.0"
+  
+  # Ignore command allows Netlify to skip builds when only docs/non-code files change
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- . ':!docs/' ':!*.md' ':!summary/'"
+
+# Build environment variables
+[build.environment]
+  # Next.js specific environment variables for optimal Netlify deployment
+  NEXT_TELEMETRY_DISABLED = "1"
+  NPM_FLAGS = "--legacy-peer-deps"
+  
+  # Set NETLIFY flag to true (used in next.config.js to disable caching)
+  # This prevents webpack cache from triggering false positive secret scanning
+  NETLIFY = "true"
+
+# Plugin configuration for Next.js on Netlify
+# The @netlify/plugin-nextjs plugin provides Next.js optimizations
+# This plugin automatically:
+# - Handles Next.js API routes at /api/*
+# - Manages Server-Side Rendering (SSR) and Static Site Generation (SSG)
+# - Optimizes build output for Netlify's CDN
+# - Manages rewrites, redirects, and middleware
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# ===================================
+# SECRET SCANNING CONFIGURATION
+# ===================================
+# Netlify automatically scans builds for potential secrets.
+# For Next.js apps, NEXT_PUBLIC_* variables are INTENTIONALLY public
+# and will appear in webpack cache - this is expected behavior.
+# 
+# SOLUTION IMPLEMENTED:
+# 1. Disabled webpack filesystem caching in next.config.js when NETLIFY=true
+# 2. Clean cache directories before build (rm -rf .next/cache .netlify/.next/cache)
+# 3. Excluded cache directories in .netlifyignore (for deployment)
+# 4. Documented that NEXT_PUBLIC_* variables are safe to expose
+#
+# Trade-off: Builds are slightly slower without cache (~30-60s longer)
+# Benefit: Eliminates false positive secret scanning warnings
+#
+# If you still see warnings for NEXT_PUBLIC_SUPABASE_URL:
+# - This is a FALSE POSITIVE (these vars are meant to be public)
+# - The anon key is protected by Supabase Row Level Security (RLS)
+# - Service role key is NEVER exposed (server-side only, no NEXT_PUBLIC_ prefix)
+# - Safe to acknowledge and proceed with deployment
+# ===================================
+
+# Production deployment settings
+[context.production]
+  # Production environment variables (actual values set in Netlify UI)
+  # These are placeholders - set actual values in Netlify dashboard
+  [context.production.environment]
+    NEXT_PUBLIC_APP_URL = "https://school-management-system.netlify.app"
+    # NODE_ENV is automatically set by Next.js build process
+
+# Development/Preview deployment settings
+[context.deploy-preview]
+  # Command for preview deployments
+  command = "npm run build"
+  
+  [context.deploy-preview.environment]
+    NEXT_PUBLIC_APP_URL = "https://deploy-preview-$DEPLOY_ID--school-management-system.netlify.app"
+    # NODE_ENV is automatically set by Next.js build process
+
+# Branch-specific deployment settings
+[context.branch-deploy]
+  command = "npm run build"
+
+# HTTP Headers for security and performance
+[[headers]]
+  # Apply to all routes
+  for = "/*"
+  
+  [headers.values]
+    # Security headers
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    X-XSS-Protection = "1; mode=block"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    
+    # Performance headers
+    X-DNS-Prefetch-Control = "on"
+    
+    # Content Security Policy (adjust based on your needs)
+    Content-Security-Policy = """
+      default-src 'self';
+      script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.supabase.co;
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data: https: blob:;
+      font-src 'self' data:;
+      connect-src 'self' https://*.supabase.co wss://*.supabase.co;
+      frame-src 'self';
+      object-src 'none';
+      base-uri 'self';
+      form-action 'self';
+    """
+
+# Cache static assets for better performance
+[[headers]]
+  for = "/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# Redirects configuration
+# Handle legacy routes or custom redirects here
+[[redirects]]
+  from = "/admin/*"
+  to = "/dashboard/:splat"
+  status = 301
+  force = false
+
+# Redirect HTTP to HTTPS
+[[redirects]]
+  from = "http://*"
+  to = "https://:splat"
+  status = 301
+  force = true
+
+# Functions configuration (NOT USED - using Next.js API routes instead)
+# This project uses Next.js API routes (/src/app/api/**) which are handled
+# automatically by the @netlify/plugin-nextjs plugin.
+# Netlify Functions are NOT used in this project.
+# 
+# [functions]
+#   directory = "netlify/functions"
+#   node_bundler = "esbuild"
+
+# Development server configuration
+[dev]
+  # Command to start local development server
+  command = "npm run dev"
+  
+  # Port for local development
+  port = 3000
+  
+  # Auto-launch browser on start
+  autoLaunch = false
+  
+  # Framework detection
+  framework = "#custom"
+  
+  # Target port for proxy
+  targetPort = 3000
+
+# Edge Functions configuration (for faster serverless functions at edge locations)
+# Uncomment if needed
+# [[edge_functions]]
+#   function = "auth-check"
+#   path = "/api/*"
