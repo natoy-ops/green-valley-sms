@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Calendar as CalendarIcon, ShieldAlert, X, QrCode, Users, ChevronDown, ChevronRight, Search, Minus, UserX, Check, AlertTriangle, Building2, MapPin, Trash2 } from "lucide-react";
+import { Calendar as CalendarIcon, ShieldAlert, X, QrCode, Users, ChevronDown, ChevronRight, Search, Minus, UserX, Check, Megaphone, AlertTriangle, Building2, MapPin, Trash2 } from "lucide-react";
 import { VenueCard, type VenueAvailabilityStatus, type SessionConflict } from "@/components/venue-card";
 import { EventAttendanceInsights } from "@/components/event-attendance-insights";
 import { useRouter } from "next/navigation";
@@ -121,6 +121,7 @@ interface EventListItem {
   status: "live" | "scheduled" | "completed";
   startDate: string;
   endDate: string;
+  lifecycleStatus: string;
 }
 
 /**
@@ -130,6 +131,7 @@ interface EventEditData {
   id: string;
   title: string;
   description: string | null;
+  posterImageUrl: string | null;
   startDate: string;
   endDate: string;
   facility: {
@@ -384,6 +386,49 @@ function shouldRedirectToLogin(response: Response): boolean {
   return false;
 }
 
+const LIFECYCLE_LABELS: Record<string, string> = {
+  draft: "Draft",
+  pending_approval: "Pending approval",
+  approved: "Approved",
+  published: "Published",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
+
+function formatLifecycleStatus(status: string | null | undefined): string {
+  if (!status) return "";
+  const normalized = status.toLowerCase();
+  if (LIFECYCLE_LABELS[normalized]) {
+    return LIFECYCLE_LABELS[normalized];
+  }
+  return normalized
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function getLifecycleBadgeClasses(status: string | null | undefined): string {
+  const normalized = (status ?? "").toLowerCase();
+
+  switch (normalized) {
+    case "draft":
+      return "bg-muted text-muted-foreground border-border/70";
+    case "pending_approval":
+      return "bg-amber-500/10 text-amber-700 dark:text-amber-200 border-amber-500/40";
+    case "approved":
+      return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-200 border-emerald-500/40";
+    case "published":
+      return "bg-sky-500/10 text-sky-700 dark:text-sky-200 border-sky-500/40";
+    case "completed":
+      return "bg-slate-500/10 text-slate-700 dark:text-slate-200 border-slate-500/40";
+    case "cancelled":
+      return "bg-red-500/10 text-red-700 dark:text-red-200 border-red-500/40";
+    default:
+      return "bg-muted text-muted-foreground border-border/70";
+  }
+}
+
 // ============================================================================
 // Session Time Conflict Detection
 // ============================================================================
@@ -492,15 +537,16 @@ function detectSessionTimeConflicts(
   return warnings;
 }
 
+// ============================================================================
+// Main Page Component
+// ============================================================================
+
 export default function EventsPage() {
   const router = useRouter();
   const { user, loading } = useAuth();
-  const [searchTerm, setSearchTerm] = useState("");
-  const [venueFilter, setVenueFilter] = useState<string>("all");
-  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
-  const [createEventRange, setCreateEventRange] = useState<DateRange | undefined>(undefined);
   const today = startOfToday();
-  
+  const [venueFilter, setVenueFilter] = useState<string>("all");
+
   // Per-date session configuration state
   const [dateSessionConfigs, setDateSessionConfigs] = useState<Map<string, DateSessionConfig>>(new Map());
   const [selectedConfigDate, setSelectedConfigDate] = useState<string | null>(null);
@@ -546,9 +592,15 @@ export default function EventsPage() {
   const [showExclusions, setShowExclusions] = useState(false);
 
   // Create event form state
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isCreatingEvent, setIsCreatingEvent] = useState(false);
   const [createEventError, setCreateEventError] = useState<string | null>(null);
   const [createEventTitle, setCreateEventTitle] = useState("");
+  const [createEventDescription, setCreateEventDescription] = useState("");
+  const [createEventPosterUrl, setCreateEventPosterUrl] = useState("");
+  const [isUploadingPoster, setIsUploadingPoster] = useState(false);
+  const [createEventRange, setCreateEventRange] = useState<DateRange | undefined>(undefined);
+  const [searchTerm, setSearchTerm] = useState("");
 
   // Events list state
   const [eventsList, setEventsList] = useState<EventListItem[]>([]);
@@ -558,6 +610,8 @@ export default function EventsPage() {
   // Events bulk selection state
   const [selectedEventIds, setSelectedEventIds] = useState<Set<string>>(new Set());
   const [isDeletingEvents, setIsDeletingEvents] = useState(false);
+  const [isApprovingEvents, setIsApprovingEvents] = useState(false);
+  const [isPublishingEvents, setIsPublishingEvents] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 
   // Edit event state
@@ -648,6 +702,35 @@ export default function EventsPage() {
     };
   }, []);
 
+  const roleSignature = useMemo(() => (user?.roles ?? []).join("|"), [user?.roles]);
+
+  const isAdminUser = useMemo(
+    () => (user?.roles ?? []).some((role) => role === "SUPER_ADMIN" || role === "ADMIN"),
+    [user?.roles]
+  );
+
+  const resolveEventsEndpoint = useCallback(() => {
+    const roles = user?.roles ?? [];
+
+    if (roles.some((role) => role === "SUPER_ADMIN" || role === "ADMIN")) {
+      return "/api/sems/events";
+    }
+
+    if (roles.some((role) => role === "TEACHER" || role === "STAFF")) {
+      return "/api/sems/events/organizer";
+    }
+
+    if (roles.includes("STUDENT")) {
+      return "/api/sems/events/student";
+    }
+
+    if (roles.includes("PARENT")) {
+      return "/api/sems/events/parent";
+    }
+
+    return "/api/sems/events/public";
+  }, [roleSignature, user?.id]);
+
   // Load events list
   const loadEvents = useCallback(async () => {
     setIsLoadingEvents(true);
@@ -667,7 +750,8 @@ export default function EventsPage() {
         params.set("search", searchTerm.trim());
       }
 
-      const url = `/api/sems/events${params.toString() ? `?${params.toString()}` : ""}`;
+      const endpoint = resolveEventsEndpoint();
+      const url = `${endpoint}${params.toString() ? `?${params.toString()}` : ""}`;
       const response = await fetch(url, { method: "GET" });
 
       if (shouldRedirectToLogin(response)) return;
@@ -692,7 +776,7 @@ export default function EventsPage() {
     } finally {
       setIsLoadingEvents(false);
     }
-  }, [venueFilter, searchTerm, facilities]);
+  }, [venueFilter, searchTerm, facilities, resolveEventsEndpoint]);
 
   // Derived: bulk selection state for events table
   const eventSelectionState = useMemo(() => {
@@ -709,6 +793,20 @@ export default function EventsPage() {
       hasSelection: selectedEventIds.size > 0,
       selectedCount,
     };
+  }, [eventsList, selectedEventIds]);
+
+  const hasOnlyApprovedSelected = useMemo(() => {
+    if (selectedEventIds.size === 0) return false;
+    const selected = eventsList.filter((e) => selectedEventIds.has(e.id));
+    if (selected.length === 0) return false;
+    return selected.every((e) => e.lifecycleStatus === "approved");
+  }, [eventsList, selectedEventIds]);
+
+  const hasOnlyPendingApprovalSelected = useMemo(() => {
+    if (selectedEventIds.size === 0) return false;
+    const selected = eventsList.filter((e) => selectedEventIds.has(e.id));
+    if (selected.length === 0) return false;
+    return selected.every((e) => e.lifecycleStatus === "pending_approval");
   }, [eventsList, selectedEventIds]);
 
   const handleToggleSelectAllEvents = useCallback(() => {
@@ -789,6 +887,178 @@ export default function EventsPage() {
     }
   }, [selectedEventIds]);
 
+  const handleApproveSelectedEvents = useCallback(async () => {
+    if (selectedEventIds.size === 0) {
+      toast.warning("No events selected", {
+        description: "Select one or more events from the list to approve.",
+      });
+      return;
+    }
+
+    const pendingIds = Array.from(selectedEventIds).filter((id) => {
+      const event = eventsList.find((e) => e.id === id);
+      return event?.lifecycleStatus === "pending_approval";
+    });
+
+    if (pendingIds.length === 0) {
+      toast.warning("No approvable events selected", {
+        description:
+          "Only events with lifecycle status 'pending_approval' can be approved.",
+      });
+      return;
+    }
+
+    setIsApprovingEvents(true);
+
+    try {
+      let successCount = 0;
+      let failureCount = 0;
+
+      for (const id of pendingIds) {
+        const response = await fetch("/api/sems/events", {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ id, workflowAction: "APPROVE" }),
+        });
+
+        if (shouldRedirectToLogin(response)) {
+          return;
+        }
+
+        const body = (await response.json().catch(() => null)) as {
+          success?: boolean;
+          error?: { message?: string };
+        } | null;
+
+        if (!response.ok || !body?.success) {
+          failureCount += 1;
+          console.error(
+            "[EventsPage] Failed to approve event",
+            id,
+            body?.error?.message
+          );
+          continue;
+        }
+
+        successCount += 1;
+      }
+
+      if (successCount > 0) {
+        toast.success("Events approved", {
+          description:
+            successCount === 1
+              ? "1 event was approved."
+              : `${successCount} events were approved.`,
+        });
+        setSelectedEventIds(new Set());
+        void loadEvents();
+      }
+
+      if (failureCount > 0) {
+        toast.error("Some events were not approved", {
+          description:
+            "One or more selected events could not be approved. Check their status and try again.",
+        });
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to approve events.";
+      toast.error("Failed to approve events", {
+        description: message,
+      });
+    } finally {
+      setIsApprovingEvents(false);
+    }
+  }, [selectedEventIds, eventsList, loadEvents]);
+
+  const handlePublishSelectedEvents = useCallback(async () => {
+    if (selectedEventIds.size === 0) {
+      toast.warning("No events selected", {
+        description: "Select one or more events from the list to publish.",
+      });
+      return;
+    }
+
+    const approvableIds = Array.from(selectedEventIds).filter((id) => {
+      const event = eventsList.find((e) => e.id === id);
+      return event?.lifecycleStatus === "approved";
+    });
+
+    if (approvableIds.length === 0) {
+      toast.warning("No publishable events selected", {
+        description:
+          "Only events with lifecycle status 'Approved' can be published.",
+      });
+      return;
+    }
+
+    setIsPublishingEvents(true);
+
+    try {
+      let successCount = 0;
+      let failureCount = 0;
+
+      for (const id of approvableIds) {
+        const response = await fetch("/api/sems/events", {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ id, workflowAction: "PUBLISH" }),
+        });
+
+        if (shouldRedirectToLogin(response)) {
+          return;
+        }
+
+        const body = (await response.json().catch(() => null)) as {
+          success?: boolean;
+          error?: { message?: string };
+        } | null;
+
+        if (!response.ok || !body?.success) {
+          failureCount += 1;
+          console.error(
+            "[EventsPage] Failed to publish event",
+            id,
+            body?.error?.message
+          );
+          continue;
+        }
+
+        successCount += 1;
+      }
+
+      if (successCount > 0) {
+        toast.success("Events published", {
+          description:
+            successCount === 1
+              ? "1 event was published."
+              : `${successCount} events were published.`,
+        });
+        setSelectedEventIds(new Set());
+        void loadEvents();
+      }
+
+      if (failureCount > 0) {
+        toast.error("Some events were not published", {
+          description:
+            "One or more selected events could not be published. Check their lifecycle, registration window, and capacity, then try again.",
+        });
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to publish events.";
+      toast.error("Failed to publish events", {
+        description: message,
+      });
+    } finally {
+      setIsPublishingEvents(false);
+    }
+  }, [selectedEventIds, eventsList, loadEvents]);
+
   // Initial load and refresh on filter changes
   useEffect(() => {
     // Wait for facilities to load before filtering by venue
@@ -802,6 +1072,8 @@ export default function EventsPage() {
    */
   const resetForm = useCallback(() => {
     setCreateEventTitle("");
+    setCreateEventDescription("");
+    setCreateEventPosterUrl("");
     setCreateEventRange(undefined);
     setSelectedFacilityId("");
     setAudienceMode("all");
@@ -823,6 +1095,63 @@ export default function EventsPage() {
     setScannerSearchQuery("");
     setScannerError(null);
   }, []);
+
+  const handlePosterFileSelected = async (file: File | null) => {
+    if (!file) return;
+
+    if (!file.type || !file.type.startsWith("image/")) {
+      toast.error("Invalid file type", {
+        description: "Please select an image file for the event poster.",
+      });
+      return;
+    }
+
+    const maxSizeBytes = 5 * 1024 * 1024; // 5 MB
+    if (file.size > maxSizeBytes) {
+      toast.error("File too large", {
+        description: "Poster image must be 5 MB or smaller.",
+      });
+      return;
+    }
+
+    setIsUploadingPoster(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("/api/sems/events/poster-upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (shouldRedirectToLogin(response)) {
+        return;
+      }
+
+      const body = (await response.json().catch(() => null)) as
+        | { success?: boolean; data?: { url?: string }; error?: { message?: string } }
+        | null;
+
+      if (!response.ok || !body?.success || !body.data?.url) {
+        const message = body?.error?.message ?? "Unable to upload poster image.";
+        throw new Error(message);
+      }
+
+      setCreateEventPosterUrl(body.data.url);
+      toast.success("Poster uploaded", {
+        description: "This image will be used when sharing the event.",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to upload poster image.";
+      toast.error("Poster upload failed", {
+        description: message,
+      });
+    } finally {
+      setIsUploadingPoster(false);
+    }
+  };
 
   /**
    * Check venue availability when dates or sessions change.
@@ -1006,6 +1335,8 @@ export default function EventsPage() {
 
       // Populate form with event data
       setCreateEventTitle(event.title);
+      setCreateEventDescription(event.description ?? "");
+      setCreateEventPosterUrl(event.posterImageUrl ?? "");
       
       // Set date range, preferring sessionConfig.dates if available.
       // This avoids blank session UI when start_date/end_date drift from session_config.
@@ -1113,7 +1444,7 @@ export default function EventsPage() {
       // Set session config
       if (event.sessionConfig?.dates) {
         const configMap = new Map<string, DateSessionConfig>();
-        
+
         for (const dateConfig of event.sessionConfig.dates) {
           const enabledPeriods = new Set<SessionPeriod>();
           const sessions = DEFAULT_SESSION_CONFIGS.map((defaultSession) => {
@@ -1138,59 +1469,15 @@ export default function EventsPage() {
         }
 
         setDateSessionConfigs(configMap);
-        
-        // Select first date for editing
-        const firstDate = event.sessionConfig.dates[0]?.date;
-        if (firstDate) {
-          setSelectedConfigDate(firstDate);
-        }
       }
-
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to load event.";
-      setCreateEventError(message);
-      console.error("[EventsPage] Failed to load event for editing:", error);
+      console.error("[EventsPage] Failed to load event for editing", error);
+      setCreateEventError(
+        error instanceof Error ? error.message : "Unable to load event for editing."
+      );
     } finally {
       setIsLoadingEditEvent(false);
     }
-  }, [sections]);
-
-  // Load levels and sections for audience filter
-  useEffect(() => {
-    let isCancelled = false;
-
-    async function loadLevelsAndSections() {
-      setIsLoadingLevels(true);
-
-      try {
-        const response = await fetch("/api/sis/levels", { method: "GET" });
-
-        if (shouldRedirectToLogin(response)) return;
-
-        const body = (await response.json().catch(() => null)) as
-          | { success?: boolean; data?: { levels: LevelDto[]; sections: SectionDto[] }; error?: { message?: string } }
-          | null;
-
-        if (!response.ok || !body?.success || !body.data) {
-          throw new Error(body?.error?.message ?? "Unable to load levels.");
-        }
-
-        if (!isCancelled) {
-          setLevels(body.data.levels);
-          setSections(body.data.sections);
-        }
-      } catch (error) {
-        console.error("[EventsPage] Failed to load levels/sections", error);
-      } finally {
-        if (!isCancelled) setIsLoadingLevels(false);
-      }
-    }
-
-    void loadLevelsAndSections();
-
-    return () => {
-      isCancelled = true;
-    };
   }, []);
 
   // Load students for specific students mode and exclusions
@@ -1758,6 +2045,8 @@ export default function EventsPage() {
       
       const payload: Record<string, unknown> = {
         title: formData.get("title") as string,
+        description: formData.get("description") as string || undefined,
+        posterImageUrl: formData.get("posterImageUrl") as string || undefined,
         startDate: formData.get("startDate") as string,
         endDate: formData.get("endDate") as string,
         facilityId: formData.get("facilityId") as string || undefined,
@@ -1816,9 +2105,20 @@ export default function EventsPage() {
       console.log(`[EventsPage] Event ${editingEventId ? "updated" : "created"} successfully:`, body.data?.event);
 
     } catch (error) {
-      const message = error instanceof Error ? error.message : (editingEventId ? "Unable to update event." : "Unable to create event.");
+      const message =
+        error instanceof Error
+          ? error.message
+          : editingEventId
+          ? "Unable to update event."
+          : "Unable to create event.";
       setCreateEventError(message);
-      console.error(`[EventsPage] Failed to ${editingEventId ? "update" : "create"} event:`, error);
+      toast.error(editingEventId ? "Unable to update event" : "Unable to create event", {
+        description: message,
+      });
+      console.error(
+        `[EventsPage] Failed to ${editingEventId ? "update" : "create"} event:`,
+        error,
+      );
     } finally {
       setIsCreatingEvent(false);
     }
@@ -1845,9 +2145,13 @@ export default function EventsPage() {
     );
   }
 
-  // RBAC Guard - check if user has admin, super_admin, or staff role
-  const hasAccess = user?.roles.some(role =>
-    role === "ADMIN" || role === "SUPER_ADMIN" || role === "STAFF"
+  // RBAC Guard - allow admins, super admins, teachers, and staff to view the Events module
+  const hasAccess = user?.roles.some(
+    (role) =>
+      role === "ADMIN" ||
+      role === "SUPER_ADMIN" ||
+      role === "TEACHER" ||
+      role === "STAFF"
   );
 
   if (!hasAccess) {
@@ -1918,42 +2222,98 @@ export default function EventsPage() {
                   </span>
                 )}
 
-                <AlertDialog open={isDeleteDialogOpen} onOpenChange={(open: boolean) => {
-                  if (!isDeletingEvents) setIsDeleteDialogOpen(open);
-                }}>
-                  <AlertDialogTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      disabled={!eventSelectionState.hasSelection || isDeletingEvents}
-                      className="rounded-full border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                      aria-label="Delete selected events"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Delete selected events?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        This will permanently remove the selected events and cannot be undone.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel disabled={isDeletingEvents}>Cancel</AlertDialogCancel>
-                      <AlertDialogAction
-                        disabled={isDeletingEvents}
-                        onClick={async () => {
-                          await handleDeleteSelectedEvents();
-                          setIsDeleteDialogOpen(false);
-                        }}
-                      >
-                        {isDeletingEvents ? "Deleting..." : "Delete"}
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
+                {isAdminUser && (
+                  <>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            disabled={!hasOnlyPendingApprovalSelected || isApprovingEvents}
+                            onClick={() => void handleApproveSelectedEvents()}
+                            className="rounded-full border-emerald-300 text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                            aria-label="Approve selected events"
+                          >
+                            <Check className="w-4 h-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Approve selected events</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            disabled={!hasOnlyApprovedSelected || isPublishingEvents}
+                            onClick={() => void handlePublishSelectedEvents()}
+                            className="rounded-full border-sky-300 text-sky-600 hover:bg-sky-50 hover:text-sky-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                            aria-label="Publish selected events"
+                          >
+                            <Megaphone className="w-4 h-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Publish selected events</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </>
+                )}
+
+                {isAdminUser && (
+                  <AlertDialog open={isDeleteDialogOpen} onOpenChange={(open: boolean) => {
+                    if (!isDeletingEvents) setIsDeleteDialogOpen(open);
+                  }}>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              disabled={!eventSelectionState.hasSelection || isDeletingEvents}
+                              className="rounded-full border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                              aria-label="Delete selected events"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </AlertDialogTrigger>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Delete selected events</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete selected events?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          This will permanently remove the selected events and cannot be undone.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel disabled={isDeletingEvents}>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                          disabled={isDeletingEvents}
+                          onClick={async () => {
+                            await handleDeleteSelectedEvents();
+                            setIsDeleteDialogOpen(false);
+                          }}
+                        >
+                          {isDeletingEvents ? "Deleting..." : "Delete"}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                )}
                 <div className="w-full lg:w-auto">
                   <Select value={venueFilter} onValueChange={setVenueFilter}>
                     <SelectTrigger className="w-full min-w-[160px] pl-3 pr-9 py-2 text-sm border border-border rounded-full bg-card text-muted-foreground shadow-sm">
@@ -2005,6 +2365,7 @@ export default function EventsPage() {
                     <TableHead className="font-bold text-primary">Audience</TableHead>
                     <TableHead className="font-bold text-primary">Scanners</TableHead>
                     <TableHead className="text-right font-bold text-primary">Attendees</TableHead>
+                    <TableHead className="text-right font-bold text-primary">Lifecycle</TableHead>
                     <TableHead className="text-right font-bold text-primary">Status</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -2014,7 +2375,7 @@ export default function EventsPage() {
                 >
                   {isLoadingEvents ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-center py-8">
+                      <TableCell colSpan={10} className="text-center py-8">
                         <div className="flex items-center justify-center gap-2 text-muted-foreground">
                           <span className="h-4 w-4 border-2 border-gray-300 border-t-[#1B4D3E] rounded-full animate-spin" />
                           Loading events...
@@ -2023,7 +2384,7 @@ export default function EventsPage() {
                     </TableRow>
                   ) : eventsError ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-center py-8">
+                      <TableCell colSpan={10} className="text-center py-8">
                         <p className="text-red-500">{eventsError}</p>
                         <Button
                           variant="outline"
@@ -2037,7 +2398,7 @@ export default function EventsPage() {
                     </TableRow>
                   ) : eventsList.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                      <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
                         No events found. Create your first event to get started.
                       </TableCell>
                     </TableRow>
@@ -2062,11 +2423,22 @@ export default function EventsPage() {
                         return `${startStr} - ${format(end, "MMM d")}`;
                       };
 
+                      const isPublished = event.lifecycleStatus === "published";
+
                       return (
                         <TableRow
                           key={event.id}
-                          onClick={() => void openEditDialog(event.id)}
-                          className="cursor-pointer transition-all duration-150 hover:bg-card hover:shadow-sm hover:-translate-y-0.5 hover:border-border/50"
+                          onClick={() => {
+                            if (!isPublished) {
+                              void openEditDialog(event.id);
+                            }
+                          }}
+                          className={cn(
+                            "transition-all duration-150",
+                            isPublished
+                              ? "cursor-default opacity-90"
+                              : "cursor-pointer hover:bg-card hover:shadow-sm hover:-translate-y-0.5 hover:border-border/50"
+                          )}
                         >
                           <TableCell className="w-10" onClick={(e) => e.stopPropagation()}>
                             <Checkbox
@@ -2084,6 +2456,16 @@ export default function EventsPage() {
                           <TableCell className="text-muted-foreground">{event.scannerSummary}</TableCell>
                           <TableCell className="text-right font-medium">
                             {event.actualAttendees} / {event.expectedAttendees}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span
+                              className={cn(
+                                "inline-flex items-center justify-end px-2.5 py-0.5 rounded-full text-xs font-medium border",
+                                getLifecycleBadgeClasses(event.lifecycleStatus)
+                              )}
+                            >
+                              {formatLifecycleStatus(event.lifecycleStatus)}
+                            </span>
                           </TableCell>
                           <TableCell className="text-right">
                             <span
@@ -2181,7 +2563,93 @@ export default function EventsPage() {
                 />
               </div>
 
+              {/* Event Description */}
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-muted-foreground">
+                  Event Description
+                  <span className="ml-1 text-xs text-muted-foreground/70">(used for social media sharing)</span>
+                </label>
+                <textarea
+                  name="description"
+                  value={createEventDescription}
+                  onChange={(e) => setCreateEventDescription(e.target.value)}
+                  placeholder="Describe this event for social media posts and public announcements..."
+                  rows={3}
+                  className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-card text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/20 focus:border-[#1B4D3E] placeholder:text-muted-foreground/70 resize-none"
+                  disabled={isCreatingEvent}
+                />
+              </div>
+
+              {/* Event Poster Image */}
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-muted-foreground">
+                  Event Poster Image
+                  <span className="ml-1 text-xs text-muted-foreground/70">(for social media sharing)</span>
+                </label>
+                <div
+                  className={cn(
+                    "mt-1.5 rounded-lg border border-dashed border-border bg-muted/40 px-3 py-3 text-xs text-muted-foreground transition-colors",
+                    isUploadingPoster || isCreatingEvent
+                      ? "opacity-60 cursor-not-allowed"
+                      : "cursor-pointer hover:bg-muted/60"
+                  )}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const file = e.dataTransfer.files?.[0] ?? null;
+                    void handlePosterFileSelected(file);
+                  }}
+                >
+                  <label
+                    htmlFor="poster-file-input"
+                    className="flex flex-col items-center justify-center gap-1.5 text-center"
+                  >
+                    <input
+                      id="poster-file-input"
+                      type="file"
+                      name="poster-file-input"
+                      accept="image/*"
+                      className="hidden"
+                      disabled={isUploadingPoster || isCreatingEvent}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0] ?? null;
+                        void handlePosterFileSelected(file);
+                        // Allow selecting the same file again if needed
+                        e.target.value = "";
+                      }}
+                    />
+                    <span className="text-xs font-medium">
+                      {isUploadingPoster
+                        ? "Uploading poster..."
+                        : "Click to select or drop an image file here"}
+                    </span>
+                    <span className="text-[11px] text-muted-foreground/80">
+                      JPG, PNG, or WEBP up to 5 MB.
+                    </span>
+                  </label>
+                </div>
+                {createEventPosterUrl && (
+                  <div className="mt-2 rounded-lg overflow-hidden border border-border bg-muted/50">
+                    <img
+                      src={createEventPosterUrl}
+                      alt="Event poster preview"
+                      className="w-full h-32 object-cover"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = "none";
+                      }}
+                    />
+                  </div>
+                )}
+                <p className="text-[11px] text-muted-foreground/70">
+                  This image will be reused for social media posts on parent and student pages.
+                </p>
+              </div>
+
               {/* Hidden fields for form submission */}
+              <input type="hidden" name="posterImageUrl" value={createEventPosterUrl} />
               <input type="hidden" name="facilityId" value={selectedFacilityId} />
               <input
                 type="hidden"

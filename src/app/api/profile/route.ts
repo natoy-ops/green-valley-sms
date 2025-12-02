@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { getAdminSupabaseClient } from "@/core/db/supabase-client.admin";
 import type { UserRole } from "@/core/auth/types";
-import { ADMIN_SCANNER_ROLES } from "@/config/roles";
+import { ALL_USER_ROLES } from "@/config/roles";
 import { requireRoles } from "@/core/auth/server-role-guard";
 import {
   type AppUserRow,
@@ -22,7 +22,7 @@ interface UpdateProfileBody {
 }
 
 export async function GET(request: NextRequest) {
-  const roleResult = await requireRoles(request, Array.from(ADMIN_SCANNER_ROLES));
+  const roleResult = await requireRoles(request, Array.from(ALL_USER_ROLES));
   if ("error" in roleResult) {
     return roleResult.error;
   }

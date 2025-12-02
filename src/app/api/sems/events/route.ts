@@ -25,75 +25,19 @@ import {
   type EventSessionConfig,
   type EventScannerConfig,
   type UpdateEventDto,
+  type EventVisibility,
+  type WorkflowActorContext,
+  type IEventRepository,
 } from "@/modules/sems";
-import { ADMIN_ROLES, ADMIN_SCANNER_ROLES } from "@/config/roles";
+import { ADMIN_ROLES, ADMIN_SCANNER_ROLES, ADMIN_TEACHER_ROLES } from "@/config/roles";
 import { requireRoles } from "@/core/auth/server-role-guard";
+import {
+  buildActorContext,
+  formatError,
+  formatSuccess,
+  parseListEventsOptions,
+} from "./utils";
 
-// ============================================================================
-// Response Formatting Helpers
-// ============================================================================
-
-/**
- * Format a successful API response.
- *
- * @param data - Response payload
- * @param status - HTTP status code (default 200)
- * @returns NextResponse with standardized success format
- */
-function formatSuccess<T>(data: T, status = 200): NextResponse {
-  return NextResponse.json(
-    {
-      success: true,
-      data,
-      meta: {
-        timestamp: new Date().toISOString(),
-      },
-    },
-    { status }
-  );
-}
-
-/**
- * Format an error API response.
- *
- * @param status - HTTP status code
- * @param code - Machine-readable error code
- * @param message - Human-readable error message
- * @param details - Optional error details
- * @returns NextResponse with standardized error format
- */
-function formatError(
-  status: number,
-  code: string,
-  message: string,
-  details?: unknown
-): NextResponse {
-  return NextResponse.json(
-    {
-      success: false,
-      error: {
-        code,
-        message,
-        details,
-      },
-      meta: {
-        timestamp: new Date().toISOString(),
-      },
-    },
-    { status }
-  );
-}
-
-// ============================================================================
-// Authentication Helpers
-// ============================================================================
-
-/**
- * Extract access token from request headers or cookies.
- *
- * @param request - Next.js request object
- * @returns Access token string or null
- */
 // ============================================================================
 // Request Body Parsing
 // ============================================================================
@@ -114,7 +58,7 @@ function formatError(
  * - sessionConfigJson: string (JSON)
  * - scannerConfigJson: string (JSON)
  */
-function parseRequestBody(body: unknown): CreateEventDto | null {
+function parseCreateRequestBody(body: unknown): CreateEventDto | null {
   if (!body || typeof body !== "object") {
     return null;
   }
@@ -146,10 +90,41 @@ function parseRequestBody(body: unknown): CreateEventDto | null {
     // Will be caught by validation
   }
 
+  const visibility =
+    typeof data.visibility === "string" ? (data.visibility as EventVisibility) : ("internal" as EventVisibility);
+
+  const registrationRequired =
+    typeof data.registrationRequired === "boolean" ? data.registrationRequired : false;
+
+  const registrationOpensAt =
+    data.registrationOpensAt === null
+      ? null
+      : typeof data.registrationOpensAt === "string"
+      ? data.registrationOpensAt
+      : undefined;
+
+  const registrationClosesAt =
+    data.registrationClosesAt === null
+      ? null
+      : typeof data.registrationClosesAt === "string"
+      ? data.registrationClosesAt
+      : undefined;
+
+  const capacityLimit =
+    data.capacityLimit === null
+      ? null
+      : typeof data.capacityLimit === "number"
+      ? data.capacityLimit
+      : typeof data.capacityLimit === "string" && data.capacityLimit.trim() !== ""
+      ? Number(data.capacityLimit)
+      : undefined;
+
   return {
     title: typeof data.title === "string" ? data.title : "",
     description:
       typeof data.description === "string" ? data.description : undefined,
+    posterImageUrl:
+      typeof data.posterImageUrl === "string" ? data.posterImageUrl : undefined,
     startDate: typeof data.startDate === "string" ? data.startDate : "",
     endDate: typeof data.endDate === "string" ? data.endDate : "",
     facilityId:
@@ -159,6 +134,11 @@ function parseRequestBody(body: unknown): CreateEventDto | null {
     audienceConfig: audienceConfig ?? { version: 1, rules: [] },
     sessionConfig: sessionConfig ?? { version: 2, dates: [] },
     scannerConfig: scannerConfig ?? { version: 1, scannerIds: [] },
+    visibility,
+    registrationRequired,
+    registrationOpensAt,
+    registrationClosesAt,
+    capacityLimit,
   };
 }
 
@@ -201,7 +181,7 @@ function parseRequestBody(body: unknown): CreateEventDto | null {
  * ```
  */
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const authResult = await requireRoles(request, Array.from(ADMIN_ROLES));
+  const authResult = await requireRoles(request, Array.from(ADMIN_TEACHER_ROLES));
   if ("error" in authResult) {
     return authResult.error;
   }
@@ -210,7 +190,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // Step 2: Parse request body
   const body = await request.json().catch(() => null);
-  const dto = parseRequestBody(body);
+  const dto = parseCreateRequestBody(body);
 
   if (!dto) {
     return formatError(400, "INVALID_REQUEST", "Request body is required.");
@@ -218,12 +198,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   // Step 3: Create service with repository dependency
   const supabase = getAdminSupabaseClient();
-  const eventRepository = new EventRepository(supabase);
+  const eventRepository: IEventRepository = new EventRepository(supabase);
   const eventService = new EventService(eventRepository);
 
   // Step 4: Create event via service
   try {
-    const event = await eventService.createEvent(dto, appUser.id);
+    const event = await eventService.createEvent(dto, buildActorContext(appUser));
     return formatSuccess({ event }, 201);
   } catch (error) {
     // Handle domain-specific errors
@@ -278,17 +258,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
  * - status: live, scheduled, or completed
  */
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const authResult = await requireRoles(request, Array.from(ADMIN_ROLES));
+  const authResult = await requireRoles(request, Array.from(ADMIN_TEACHER_ROLES));
   if ("error" in authResult) {
     return authResult.error;
   }
-
-  // Parse query parameters
-  const { searchParams } = new URL(request.url);
-  const page = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10));
-  const pageSize = Math.min(100, Math.max(1, parseInt(searchParams.get("pageSize") ?? "20", 10)));
-  const facilityId = searchParams.get("facilityId") ?? undefined;
-  const searchTerm = searchParams.get("search") ?? undefined;
 
   // Create service with repository dependency
   const supabase = getAdminSupabaseClient();
@@ -296,12 +269,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const eventService = new EventService(eventRepository);
 
   try {
-    const result = await eventService.listEvents({
-      page,
-      pageSize,
-      facilityId,
-      searchTerm,
-    });
+    const options = parseListEventsOptions(new URL(request.url).searchParams);
+    const result = await eventService.listEvents(options);
 
     return formatSuccess(result);
   } catch (error) {
@@ -349,7 +318,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
  * ```
  */
 export async function PUT(request: NextRequest): Promise<NextResponse> {
-  const authResult = await requireRoles(request, Array.from(ADMIN_ROLES));
+  const authResult = await requireRoles(request, Array.from(ADMIN_TEACHER_ROLES));
   if ("error" in authResult) {
     return authResult.error;
   }
@@ -405,6 +374,12 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     title: typeof data.title === "string" ? data.title : undefined,
     description:
       typeof data.description === "string" ? data.description : undefined,
+    posterImageUrl:
+      data.posterImageUrl === null
+        ? null
+        : typeof data.posterImageUrl === "string"
+        ? data.posterImageUrl
+        : undefined,
     startDate:
       typeof data.startDate === "string" ? data.startDate : undefined,
     endDate: typeof data.endDate === "string" ? data.endDate : undefined,
@@ -417,6 +392,44 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     audienceConfig,
     sessionConfig,
     scannerConfig,
+    visibility:
+      typeof data.visibility === "string" ? (data.visibility as EventVisibility) : undefined,
+    registrationRequired:
+      typeof data.registrationRequired === "boolean" ? data.registrationRequired : undefined,
+    registrationOpensAt:
+      data.registrationOpensAt === null
+        ? null
+        : typeof data.registrationOpensAt === "string"
+        ? data.registrationOpensAt
+        : undefined,
+    registrationClosesAt:
+      data.registrationClosesAt === null
+        ? null
+        : typeof data.registrationClosesAt === "string"
+        ? data.registrationClosesAt
+        : undefined,
+    capacityLimit:
+      data.capacityLimit === null
+        ? null
+        : typeof data.capacityLimit === "number"
+        ? data.capacityLimit
+        : typeof data.capacityLimit === "string" && data.capacityLimit.trim() !== ""
+        ? Number(data.capacityLimit)
+        : undefined,
+    workflowAction:
+      typeof data.workflowAction === "string" ? (data.workflowAction as UpdateEventDto["workflowAction"]) : undefined,
+    workflowComment:
+      data.workflowComment === null
+        ? null
+        : typeof data.workflowComment === "string"
+        ? data.workflowComment
+        : undefined,
+    actionReason:
+      data.actionReason === null
+        ? null
+        : typeof data.actionReason === "string"
+        ? data.actionReason
+        : undefined,
   };
 
   // Step 3: Create service with repository dependency
@@ -426,7 +439,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
 
   // Step 4: Update event via service
   try {
-    const event = await eventService.updateEvent(dto, appUser.id);
+    const event = await eventService.updateEvent(dto, buildActorContext(appUser));
     return formatSuccess({ event }, 200);
   } catch (error) {
     // Handle domain-specific errors

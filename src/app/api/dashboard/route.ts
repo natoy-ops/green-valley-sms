@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSupabaseClient } from "@/core/db/supabase-client.admin";
-import { ADMIN_ROLES } from "@/config/roles";
+import { ADMIN_TEACHER_ROLES } from "@/config/roles";
 import { requireRoles } from "@/core/auth/server-role-guard";
 
 function formatSuccess<T>(data: T, status = 200) {
@@ -78,7 +78,7 @@ export interface DashboardData {
 }
 
 export async function GET(request: NextRequest) {
-  const authResult = await requireRoles(request, Array.from(ADMIN_ROLES));
+  const authResult = await requireRoles(request, Array.from(ADMIN_TEACHER_ROLES));
   if ("error" in authResult) {
     return authResult.error;
   }

@@ -2,11 +2,12 @@
 
 import type React from "react";
 import { useEffect, useState } from "react";
-import { Users, X, FileSpreadsheet, FileText, Download, ChevronDown } from "lucide-react";
+import { Users, X, FileSpreadsheet, FileText, Download, ChevronDown, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 type StudentStatus = "Active" | "Inactive" | "Pending";
 
@@ -19,6 +20,19 @@ type StudentRecord = {
   status: StudentStatus;
   guardianPhone: string | null;
   guardianEmail: string | null;
+};
+
+type StudentCredential = {
+  studentName: string;
+  email: string;
+  temporaryPassword: string;
+};
+
+type GuardianCredential = {
+  guardianName: string;
+  email: string;
+  temporaryPassword: string;
+  linkedStudents: string[];
 };
 
 type LevelOption = {
@@ -89,6 +103,60 @@ export default function RegistryPage() {
   const [editStudentStatus, setEditStudentStatus] = useState<StudentStatus>("Active");
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [studentCredentialsForDownload, setStudentCredentialsForDownload] = useState<
+    StudentCredential[]
+  >([]);
+  const [guardianCredentialsForDownload, setGuardianCredentialsForDownload] = useState<
+    GuardianCredential[]
+  >([]);
+  const [bulkImportStatus, setBulkImportStatus] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+
+  const downloadCsvFile = (filename: string, headers: string[], rows: string[][]) => {
+    if (typeof window === "undefined" || rows.length === 0) return;
+
+    const escapeCsv = (value: string): string => {
+      if (value.includes(",") || value.includes("\"") || value.includes("\n")) {
+        return `"${value.replace(/\"/g, '""')}"`;
+      }
+      return value;
+    };
+
+    const lines = [
+      headers.join(","),
+      ...rows.map((row) => row.map((cell) => escapeCsv(cell)).join(",")),
+    ];
+
+    const blob = new Blob([lines.join("\n")], {
+      type: "text/csv;charset=utf-8;",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  function resetBulkImportState(preserveCredentials = false) {
+    setBulkFileName(null);
+    setBulkImportMessage(null);
+    setBulkImportErrors([]);
+    if (!preserveCredentials) {
+      setStudentCredentialsForDownload([]);
+      setGuardianCredentialsForDownload([]);
+    }
+    setIsImportingStudents(false);
+    setBulkImportStatus("idle");
+  }
+
+  function clearCredentialsBanner() {
+    setStudentCredentialsForDownload([]);
+    setGuardianCredentialsForDownload([]);
+  }
 
   async function handleExportQrCodes(format: "excel" | "word") {
     if (isExporting) return;
@@ -152,6 +220,7 @@ export default function RegistryPage() {
     setBulkImportMessage(null);
     setBulkImportErrors([]);
     setIsImportingStudents(true);
+    setBulkImportStatus("loading");
 
     try {
       const form = event.currentTarget;
@@ -163,6 +232,7 @@ export default function RegistryPage() {
       if (!file) {
         setBulkImportMessage("Please choose a CSV file before continuing.");
         setIsImportingStudents(false);
+        setBulkImportStatus("error");
         return;
       }
 
@@ -180,6 +250,17 @@ export default function RegistryPage() {
               summary?: { totalRows: number; importedCount: number; failedCount: number };
               errors?: { rowNumber: number; message: string }[];
               students?: StudentRecord[];
+              studentCredentials?: {
+                studentName: string;
+                email: string;
+                temporaryPassword: string;
+              }[];
+              guardianCredentials?: {
+                guardianName: string;
+                email: string;
+                temporaryPassword: string;
+                linkedStudents: string[];
+              }[];
             };
             error?: { message?: string };
           }
@@ -189,41 +270,69 @@ export default function RegistryPage() {
         const message = body?.error?.message ?? "Unable to import students. Please try again.";
         setBulkImportMessage(message);
         setIsImportingStudents(false);
+        setBulkImportStatus("error");
         return;
       }
 
       const summary = body.data.summary;
       const imported = body.data.students ?? [];
+      const studentCredentials = body.data.studentCredentials ?? [];
+      const guardianCredentials = body.data.guardianCredentials ?? [];
 
       // All-or-nothing: if any row failed, do not insert any students
       if (summary.failedCount > 0) {
-        setBulkImportMessage(
-          "Some rows reference levels/sections that dont exist yet. Fix them in the CSV or create the missing levels/sections, then try again."
-        );
+        const message =
+          "Some rows reference levels/sections that don't exist yet. Fix them in the CSV or create the missing levels/sections, then try again.";
+        setBulkImportMessage(message);
         setBulkImportErrors(body.data.errors ?? []);
         setIsImportingStudents(false);
+        setBulkImportStatus("error");
         return;
       }
 
       if (imported.length > 0) {
-        setStudents((previous: StudentRecord[]) => [...imported, ...previous]);
+        setStudents((previous: StudentRecord[]) => {
+          const byId = new Map<string, StudentRecord>();
+
+          // Start with existing students
+          for (const student of previous) {
+            byId.set(student.id, student);
+          }
+
+          // Overlay imported students (latest data wins)
+          for (const student of imported) {
+            byId.set(student.id, student);
+          }
+
+          return Array.from(byId.values());
+        });
       }
+      setStudentCredentialsForDownload(studentCredentials);
+      setGuardianCredentialsForDownload(guardianCredentials);
 
-      const message = `Imported ${summary.importedCount} of ${summary.totalRows} rows. ${summary.failedCount} failed.`;
+      const createdStudentAccounts = studentCredentials.length;
+      const createdGuardianAccounts = guardianCredentials.length;
+
+      const summaryMessage = `Imported ${summary.importedCount} of ${summary.totalRows} rows.`;
+      const accountMessage =
+        createdStudentAccounts > 0 || createdGuardianAccounts > 0
+          ? `${createdStudentAccounts} new student account${
+              createdStudentAccounts === 1 ? "" : "s"
+            }, ${createdGuardianAccounts} new parent account${
+              createdGuardianAccounts === 1 ? "" : "s"
+            }.`
+          : "No new login credentials were generated.";
+
+      const message = `${summaryMessage} ${accountMessage}`;
       setBulkImportMessage(message);
-
-      // Briefly show the message, then close the dialog
-      setTimeout(() => {
-        setIsBulkImportDialogOpen(false);
-        setBulkFileName(null);
-        setBulkImportMessage(null);
-        setBulkImportErrors([]);
-      }, 1200);
-    } catch (error) {
-      setBulkImportMessage(
-        error instanceof Error ? error.message : "Unable to import students. Please try again."
-      );
       setIsImportingStudents(false);
+      setBulkImportStatus("success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to import students. Please try again.";
+      setBulkImportMessage(message);
+      setIsImportingStudents(false);
+      setBulkImportStatus("error");
     }
   }
 
@@ -887,7 +996,8 @@ export default function RegistryPage() {
   const addStudentSectionsForSelectedLevel = addStudentLevelName
     ? getSectionsForLevelName(addStudentLevelName)
     : [];
-  const shouldShowAddStudentSectionField = addStudentSectionsForSelectedLevel.length > 0;
+  const shouldShowAddStudentSectionField =
+    addStudentSectionsForSelectedLevel.length > 0;
   const editStudentSectionsForSelectedLevel = editStudentLevelName
     ? getSectionsForLevelName(editStudentLevelName)
     : [];
@@ -900,9 +1010,14 @@ export default function RegistryPage() {
     const headers = [
       "ID / LRN",
       "First Name",
+      "Middle Name",
       "Last Name",
       "Grade / Level",
       "Section",
+      "Student Email",
+      "Guardian First Name",
+      "Guardian Middle Name",
+      "Guardian Last Name",
       "Guardian Phone",
       "Guardian Email",
     ];
@@ -921,7 +1036,7 @@ export default function RegistryPage() {
 
   return (
     <>
-      <div className="flex-1 flex flex-col space-y-6 min-h-0 overflow-y-auto hide-scrollbar px-4 py-4 sm:px-6">
+    <div className="flex-1 flex flex-col space-y-6 min-h-0 overflow-y-auto hide-scrollbar px-4 py-4 sm:px-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-start gap-3 w-full">
           <div className="hidden sm:flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700">
@@ -1027,6 +1142,91 @@ export default function RegistryPage() {
           </Button>
         </div>
       </div>
+
+      {/* Persistent credentials banner - shows outside the dialog so users don't lose access */}
+      {!isBulkImportDialogOpen &&
+        (studentCredentialsForDownload.length > 0 ||
+          guardianCredentialsForDownload.length > 0) && (
+          <Alert className="border border-emerald-200 bg-emerald-50 mb-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-3">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+                  <Download className="h-4 w-4" />
+                </div>
+                <div>
+                  <AlertTitle className="text-sm font-medium text-emerald-800">
+                    Login credentials available
+                  </AlertTitle>
+                  <AlertDescription className="text-xs text-emerald-700">
+                    {studentCredentialsForDownload.length} student account
+                    {studentCredentialsForDownload.length === 1 ? "" : "s"} and{" "}
+                    {guardianCredentialsForDownload.length} parent account
+                    {guardianCredentialsForDownload.length === 1 ? "" : "s"} were created.
+                    Download the CSV files to distribute the temporary passwords.
+                  </AlertDescription>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 pl-11 sm:pl-0">
+                {studentCredentialsForDownload.length > 0 && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-3 text-xs bg-white border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                    onClick={() => {
+                      const headers = ["Student Name", "Email", "Temporary Password"];
+                      const rows = studentCredentialsForDownload.map((cred) => [
+                        cred.studentName,
+                        cred.email,
+                        cred.temporaryPassword,
+                      ]);
+                      downloadCsvFile(`student-credentials-${Date.now()}.csv`, headers, rows);
+                    }}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Student credentials
+                  </Button>
+                )}
+                {guardianCredentialsForDownload.length > 0 && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-3 text-xs bg-white border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                    onClick={() => {
+                      const headers = [
+                        "Guardian Name",
+                        "Email",
+                        "Temporary Password",
+                        "Linked Students",
+                      ];
+                      const rows = guardianCredentialsForDownload.map((cred) => [
+                        cred.guardianName,
+                        cred.email,
+                        cred.temporaryPassword,
+                        cred.linkedStudents.join("; "),
+                      ]);
+                      downloadCsvFile(`guardian-credentials-${Date.now()}.csv`, headers, rows);
+                    }}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Parent credentials
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 px-2 text-xs text-emerald-600 hover:text-emerald-700 hover:bg-emerald-100"
+                  onClick={clearCredentialsBanner}
+                  aria-label="Dismiss banner"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </Alert>
+        )}
 
       <Card className="flex-1 flex flex-col w-full border-border shadow-sm">
         <CardHeader className="border-b border-gray-50 pb-4">
@@ -1861,7 +2061,12 @@ export default function RegistryPage() {
       {isBulkImportDialogOpen && (
         <div
           className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 backdrop-blur-sm dialog-backdrop-animate"
-          onClick={() => setIsBulkImportDialogOpen(false)}
+          onClick={() => {
+            // Block closing while import is in progress
+            if (isImportingStudents) return;
+            resetBulkImportState(true); // preserve credentials
+            setIsBulkImportDialogOpen(false);
+          }}
         >
           <div
             className="bg-card rounded-2xl shadow-xl w-full max-w-xl border border-border/50 dialog-panel-animate"
@@ -1876,9 +2081,17 @@ export default function RegistryPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setIsBulkImportDialogOpen(false)}
-                className="text-muted-foreground/70 hover:text-muted-foreground"
+                onClick={() => {
+                  // Block closing while import is in progress
+                  if (isImportingStudents) return;
+                  resetBulkImportState(true); // preserve credentials
+                  setIsBulkImportDialogOpen(false);
+                }}
+                className={`text-muted-foreground/70 hover:text-muted-foreground ${
+                  isImportingStudents ? "opacity-40 cursor-not-allowed" : ""
+                }`}
                 aria-label="Close bulk import dialog"
+                disabled={isImportingStudents}
               >
                 <X className="w-5 h-5" />
               </button>
@@ -1895,7 +2108,12 @@ export default function RegistryPage() {
                   <label className="block text-sm font-medium text-muted-foreground">CSV file</label>
                   <label
                     htmlFor="bulk-import-file"
-                    className="flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border bg-muted/60 px-4 py-6 text-center cursor-pointer hover:border-[#1B4D3E]/40 hover:bg-card transition-colors"
+                    className={`flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border bg-muted/60 px-4 py-6 text-center transition-colors ${
+                      isImportingStudents
+                        ? "opacity-60 cursor-not-allowed"
+                        : "cursor-pointer hover:border-[#1B4D3E]/40 hover:bg-card"
+                    }`}
+                    aria-disabled={isImportingStudents}
                   >
                     <span className="text-sm font-medium text-foreground">Click to choose file or drag and drop</span>
                     <span className="text-xs text-muted-foreground">Accepted format: .csv</span>
@@ -1912,6 +2130,7 @@ export default function RegistryPage() {
                       type="file"
                       accept=".csv"
                       className="hidden"
+                      disabled={isImportingStudents}
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         setBulkFileName(file ? file.name : null);
@@ -1940,7 +2159,7 @@ export default function RegistryPage() {
                     </li>
                   </ul>
                   <p className="text-[11px] text-muted-foreground">
-                    Optional columns such as Guardian Phone and Guardian Email can be added as extra columns in the CSV.
+                    Optional columns: Middle Name, Student Email (creates student login), Guardian First Name, Guardian Middle Name, Guardian Last Name, Guardian Phone, and Guardian Email (creates parent login and links to student).
                   </p>
                 </div>
 
@@ -1956,8 +2175,45 @@ export default function RegistryPage() {
                   </Button>
                 </div>
 
-                {bulkImportMessage && (
-                  <p className="text-xs text-muted-foreground pt-2">{bulkImportMessage}</p>
+                {bulkImportStatus === "loading" && (
+                  <Alert className="mt-3 border text-xs border-[#1B4D3E]/30 bg-[#1B4D3E]/5">
+                    <div className="flex items-start gap-3">
+                      <Loader2 className="h-4 w-4 animate-spin text-[#1B4D3E] mt-0.5 shrink-0" />
+                      <div className="space-y-0.5">
+                        <AlertTitle className="text-xs font-medium text-[#1B4D3E]">
+                          Importing students...
+                        </AlertTitle>
+                        <AlertDescription className="text-[11px] leading-snug text-[#1B4D3E]/80">
+                          Please wait. This may take a moment. Do not close this dialog until the
+                          import completes.
+                        </AlertDescription>
+                      </div>
+                    </div>
+                  </Alert>
+                )}
+
+                {bulkImportStatus === "success" && bulkImportMessage && (
+                  <Alert className="mt-3 border text-xs border-emerald-200 bg-emerald-50">
+                    <div className="space-y-0.5">
+                      <AlertTitle className="text-xs font-medium text-emerald-800">
+                        Import completed
+                      </AlertTitle>
+                      <AlertDescription className="text-[11px] leading-snug text-emerald-700">
+                        {bulkImportMessage}
+                      </AlertDescription>
+                    </div>
+                  </Alert>
+                )}
+
+                {bulkImportStatus === "error" && bulkImportMessage && (
+                  <Alert variant="destructive" className="mt-3 border text-xs">
+                    <div className="space-y-0.5">
+                      <AlertTitle className="text-xs font-medium">Import issue</AlertTitle>
+                      <AlertDescription className="text-[11px] leading-snug">
+                        {bulkImportMessage}
+                      </AlertDescription>
+                    </div>
+                  </Alert>
                 )}
 
                 {bulkImportErrors.length > 0 && (
@@ -1988,22 +2244,103 @@ export default function RegistryPage() {
                   </div>
                 )}
 
+                {(studentCredentialsForDownload.length > 0 ||
+                  guardianCredentialsForDownload.length > 0) && (
+                  <div className="mt-2 flex flex-col gap-2 rounded-lg border border-border/60 bg-muted/60 px-3 py-2 text-[11px] sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-muted-foreground">
+                      Need another copy? You can re-download the latest login credentials here.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {studentCredentialsForDownload.length > 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-3 text-xs"
+                          onClick={() => {
+                            const headers = ["Student Name", "Email", "Temporary Password"];
+                            const rows = studentCredentialsForDownload.map((cred) => [
+                              cred.studentName,
+                              cred.email,
+                              cred.temporaryPassword,
+                            ]);
+                            downloadCsvFile(
+                              `student-credentials-${Date.now()}.csv`,
+                              headers,
+                              rows
+                            );
+                          }}
+                        >
+                          Download student credentials CSV
+                        </Button>
+                      )}
+                      {guardianCredentialsForDownload.length > 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-3 text-xs"
+                          onClick={() => {
+                            const headers = [
+                              "Guardian Name",
+                              "Email",
+                              "Temporary Password",
+                              "Linked Students",
+                            ];
+                            const rows = guardianCredentialsForDownload.map((cred) => [
+                              cred.guardianName,
+                              cred.email,
+                              cred.temporaryPassword,
+                              cred.linkedStudents.join("; "),
+                            ]);
+                            downloadCsvFile(
+                              `guardian-credentials-${Date.now()}.csv`,
+                              headers,
+                              rows
+                            );
+                          }}
+                        >
+                          Download parent credentials CSV
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <p className="pt-2 text-[11px] text-muted-foreground text-right">
+                  When the import finishes, you'll be able to download a CSV with student and guardian
+                  login credentials.
+                </p>
+
                 <div className="flex items-center justify-end gap-2 pt-3 border-t border-border/50 mt-2">
                   <Button
                     type="button"
                     variant="outline"
                     className="text-sm px-4"
-                    onClick={() => setIsBulkImportDialogOpen(false)}
+                    disabled={isImportingStudents}
+                    onClick={() => {
+                      resetBulkImportState(true); // preserve credentials
+                      setIsBulkImportDialogOpen(false);
+                    }}
                   >
-                    Cancel
+                    {bulkImportStatus === "success" ? "Close" : "Cancel"}
                   </Button>
-                  <Button
-                    type="submit"
-                    className="bg-[#1B4D3E] text-white hover:bg-[#163e32] text-sm px-4 py-2 rounded-lg shadow-sm"
-                    disabled={!bulkFileName || isImportingStudents}
-                  >
-                    {isImportingStudents ? "Importing..." : "Continue Import"}
-                  </Button>
+                  {bulkImportStatus !== "success" && (
+                    <Button
+                      type="submit"
+                      className="bg-[#1B4D3E] text-white hover:bg-[#163e32] text-sm px-4 py-2 rounded-lg shadow-sm"
+                      disabled={!bulkFileName || isImportingStudents}
+                    >
+                      {isImportingStudents ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Importing...
+                        </>
+                      ) : (
+                        "Continue Import"
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
             </form>

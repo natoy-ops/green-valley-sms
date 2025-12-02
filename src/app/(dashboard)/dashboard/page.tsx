@@ -160,8 +160,10 @@ export default function AdminDashboardPage() {
     );
   }
 
-  // RBAC Guard - check if user has admin or super_admin role
-  const hasAccess = user?.roles.some(role => role === "ADMIN" || role === "SUPER_ADMIN");
+  // RBAC Guard - allow admins, super admins, and staff to view the dashboard
+  const hasAccess = user?.roles.some(
+    (role) => role === "ADMIN" || role === "SUPER_ADMIN" || role === "STAFF"
+  );
   
   if (!hasAccess) {
     return (

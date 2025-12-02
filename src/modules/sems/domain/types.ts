@@ -79,6 +79,12 @@ export interface StudentRule extends AudienceRuleBase {
  */
 export type AudienceRule = AllStudentsRule | LevelRule | SectionRule | StudentRule;
 
+export interface StudentAudienceContext {
+  studentId: string;
+  sectionId: string | null;
+  levelId: string | null;
+}
+
 /**
  * Versioned configuration for event audience targeting.
  *
@@ -107,6 +113,65 @@ export interface EventScannerConfig {
   version: 1;
   /** Ordered list of app_user IDs allowed to scan for this event */
   scannerIds: string[];
+}
+
+// ============================================================================
+// Lifecycle & Visibility Types
+// ============================================================================
+
+import type { UserRole } from "@/core/auth/types";
+
+export interface WorkflowActorContext {
+  userId: string;
+  roles: UserRole[];
+}
+
+export type EventLifecycleStatus =
+  | "draft"
+  | "pending_approval"
+  | "approved"
+  | "published"
+  | "completed"
+  | "cancelled";
+
+export type EventVisibility = "internal" | "student" | "public";
+
+export type EventWorkflowAction =
+  | "SUBMIT_FOR_APPROVAL"
+  | "APPROVE"
+  | "REJECT"
+  | "PUBLISH"
+  | "COMPLETE"
+  | "CANCEL";
+
+export interface EventLifecycleAuditFields {
+  lifecycleStatus: EventLifecycleStatus;
+  submittedForApprovalAt: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  approvalComment: string | null;
+  rejectedBy: string | null;
+  rejectedAt: string | null;
+  rejectionComment: string | null;
+  publishedAt: string | null;
+  completedAt: string | null;
+  cancelledBy: string | null;
+  cancelledAt: string | null;
+  cancellationReason: string | null;
+}
+
+export interface EventRegistrationMetadata {
+  registrationRequired: boolean;
+  registrationOpensAt: string | null;
+  registrationClosesAt: string | null;
+  capacityLimit: number | null;
+}
+
+export interface EventWorkflowActionInput {
+  eventId: string;
+  action: EventWorkflowAction;
+  comment?: string;
+  reason?: string;
 }
 
 // ============================================================================
@@ -175,6 +240,7 @@ export interface EventRow {
   id: string;
   title: string;
   description: string | null;
+  poster_image_url: string | null;
   event_date: string | null; // Legacy single date
   start_date: string | null;
   end_date: string | null;
@@ -182,10 +248,37 @@ export interface EventRow {
   target_audience: EventAudienceConfig;
   session_config: EventSessionConfig;
   scanner_assignments: EventScannerConfig;
+  lifecycle_status: EventLifecycleStatus;
+  owner_user_id: string | null;
+  submitted_for_approval_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  approval_comment: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  rejection_comment: string | null;
+  published_at: string | null;
+  completed_at: string | null;
+  cancelled_by: string | null;
+  cancelled_at: string | null;
+  cancellation_reason: string | null;
+  visibility: EventVisibility;
+  registration_required: boolean;
+  registration_opens_at: string | null;
+  registration_closes_at: string | null;
+  capacity_limit: number | null;
   created_by: string | null;
   created_at: string;
   updated_by: string | null;
   updated_at: string | null;
+}
+
+export interface EventWithFacilityRow extends EventRow {
+  facilities: {
+    id: string;
+    name: string;
+    location_identifier: string;
+  } | null;
 }
 
 /**
@@ -202,12 +295,33 @@ export interface EventRow {
 export interface CreateEventDto {
   title: string;
   description?: string;
+  /** URL to poster/banner image for social media sharing */
+  posterImageUrl?: string;
   startDate: string; // YYYY-MM-DD
   endDate: string; // YYYY-MM-DD
   facilityId?: string;
   audienceConfig: EventAudienceConfig;
   sessionConfig: EventSessionConfig;
   scannerConfig: EventScannerConfig;
+  visibility: EventVisibility;
+  registrationRequired: boolean;
+  registrationOpensAt?: string | null;
+  registrationClosesAt?: string | null;
+  capacityLimit?: number | null;
+  ownerUserId?: string;
+  lifecycleStatus?: EventLifecycleStatus;
+  submittedForApprovalAt?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  approvalComment?: string | null;
+  rejectedBy?: string | null;
+  rejectedAt?: string | null;
+  rejectionComment?: string | null;
+  publishedAt?: string | null;
+  completedAt?: string | null;
+  cancelledBy?: string | null;
+  cancelledAt?: string | null;
+  cancellationReason?: string | null;
 }
 
 /**
@@ -221,12 +335,36 @@ export interface UpdateEventDto {
   id: string;
   title?: string;
   description?: string;
+  /** URL to poster/banner image for social media sharing */
+  posterImageUrl?: string | null;
   startDate?: string;
   endDate?: string;
   facilityId?: string | null;
   audienceConfig?: EventAudienceConfig;
   sessionConfig?: EventSessionConfig;
   scannerConfig?: EventScannerConfig;
+  visibility?: EventVisibility;
+  registrationRequired?: boolean;
+  registrationOpensAt?: string | null;
+  registrationClosesAt?: string | null;
+  capacityLimit?: number | null;
+  ownerUserId?: string | null;
+  lifecycleStatus?: EventLifecycleStatus;
+  submittedForApprovalAt?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  approvalComment?: string | null;
+  rejectedBy?: string | null;
+  rejectedAt?: string | null;
+  rejectionComment?: string | null;
+  publishedAt?: string | null;
+  completedAt?: string | null;
+  cancelledBy?: string | null;
+  cancelledAt?: string | null;
+  cancellationReason?: string | null;
+  workflowAction?: EventWorkflowAction;
+  workflowComment?: string | null;
+  actionReason?: string | null;
 }
 
 /**
@@ -242,6 +380,8 @@ export interface EventDto {
   id: string;
   title: string;
   description: string | null;
+  /** URL to poster/banner image for social media sharing */
+  posterImageUrl: string | null;
   startDate: string;
   endDate: string;
   facility: {
@@ -252,6 +392,22 @@ export interface EventDto {
   audienceConfig: EventAudienceConfig;
   sessionConfig: EventSessionConfig;
   scannerConfig: EventScannerConfig;
+  lifecycleStatus: EventLifecycleStatus;
+  ownerUserId: string | null;
+  visibility: EventVisibility;
+  registration: EventRegistrationMetadata;
+  submittedForApprovalAt: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  approvalComment: string | null;
+  rejectedBy: string | null;
+  rejectedAt: string | null;
+  rejectionComment: string | null;
+  publishedAt: string | null;
+  completedAt: string | null;
+  cancelledBy: string | null;
+  cancelledAt: string | null;
+  cancellationReason: string | null;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string | null;
@@ -260,6 +416,22 @@ export interface EventDto {
 // ============================================================================
 // Event List Types
 // ============================================================================
+
+/**
+ * Filtering and pagination options for event listings.
+ */
+export interface ListEventsOptions {
+  page?: number;
+  pageSize?: number;
+  facilityId?: string;
+  searchTerm?: string;
+  ownerUserId?: string;
+  ownerOrInternalForUserId?: string;
+  lifecycleStatuses?: EventLifecycleStatus[];
+  excludeLifecycleStatuses?: EventLifecycleStatus[];
+  visibilities?: EventVisibility[];
+  disablePagination?: boolean;
+}
 
 /**
  * Event status for display purposes.
@@ -287,6 +459,7 @@ export interface EventListItemDto {
   timeRange: string;
   /** Venue/facility name */
   venue: string | null;
+  description: string | null;
   /** Human-readable audience summary, e.g., "All Students", "Grades 7-10" */
   audienceSummary: string;
   /** Summary of assigned scanners */
@@ -301,6 +474,9 @@ export interface EventListItemDto {
   startDate: string;
   /** End date for sorting/filtering */
   endDate: string;
+  lifecycleStatus: EventLifecycleStatus;
+  visibility: EventVisibility;
+  posterImageUrl: string | null;
 }
 
 /**

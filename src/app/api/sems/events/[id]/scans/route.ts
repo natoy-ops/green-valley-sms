@@ -138,6 +138,14 @@ export async function POST(
       return formatError(404, "NOT_FOUND", "Event not found.");
     }
 
+    if (event.lifecycleStatus !== "published") {
+      return formatError(
+        409,
+        "EVENT_NOT_ACTIVE",
+        "Scans can only be uploaded while the event is published."
+      );
+    }
+
     // Check if user is a scanner for this event
     const scannerIds = Array.isArray(event.scannerConfig?.scannerIds)
       ? event.scannerConfig.scannerIds

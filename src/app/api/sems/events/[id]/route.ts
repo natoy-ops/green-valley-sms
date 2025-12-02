@@ -12,7 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSupabaseClient } from "@/core/db/supabase-client.admin";
 import { EventRepository, EventService } from "@/modules/sems";
-import { ADMIN_ROLES } from "@/config/roles";
+import { ADMIN_TEACHER_ROLES } from "@/config/roles";
 import { requireRoles } from "@/core/auth/server-role-guard";
 
 // ============================================================================
@@ -66,7 +66,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
-  const authResult = await requireRoles(request, Array.from(ADMIN_ROLES));
+  const authResult = await requireRoles(request, Array.from(ADMIN_TEACHER_ROLES));
   if ("error" in authResult) {
     return authResult.error;
   }
