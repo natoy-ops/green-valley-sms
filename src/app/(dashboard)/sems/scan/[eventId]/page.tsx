@@ -69,6 +69,8 @@ export default function EventScannerPage() {
     totalDuplicates: 0,
   });
   const [isCameraSupported, setIsCameraSupported] = useState<boolean | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isTorchSupported, setIsTorchSupported] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -351,8 +353,66 @@ export default function EventScannerPage() {
     scanningModeRef.current = null;
   }
 
+  // Check if torch is supported and toggle it
+  async function toggleTorch(enable: boolean) {
+    const stream = streamRef.current;
+    if (!stream) return;
+
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) return;
+
+    try {
+      // Use ImageCapture API to check torch capability
+      const capabilities = videoTrack.getCapabilities?.() as MediaTrackCapabilities & { torch?: boolean };
+      if (!capabilities?.torch) {
+        return; // Torch not supported
+      }
+
+      await videoTrack.applyConstraints({
+        advanced: [{ torch: enable } as MediaTrackConstraintSet],
+      });
+      setFlashOn(enable);
+    } catch {
+      // Torch control failed silently
+    }
+  }
+
+  // Check torch support when stream is available
+  function checkTorchSupport(stream: MediaStream) {
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) {
+      setIsTorchSupported(false);
+      return;
+    }
+
+    try {
+      const capabilities = videoTrack.getCapabilities?.() as MediaTrackCapabilities & { torch?: boolean };
+      setIsTorchSupported(!!capabilities?.torch);
+    } catch {
+      setIsTorchSupported(false);
+    }
+  }
+
   async function startScanning() {
     if (isScanningRef.current) return;
+    setCameraError(null);
+
+    // Helper to get camera stream with fallback constraints for mobile compatibility
+    async function getCameraStream(): Promise<MediaStream> {
+      // Try back camera first with flexible constraint
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+      } catch {
+        // Fallback: try any available camera
+        return await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      }
+    }
 
     const BarcodeDetectorCtor = (typeof window !== "undefined"
       ? (window as any).BarcodeDetector
@@ -362,12 +422,9 @@ export default function EventScannerPage() {
         })
       | undefined;
 
-    if (BarcodeDetectorCtor && typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
+    if (BarcodeDetectorCtor && typeof navigator !== "undefined" && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
-          audio: false,
-        });
+        const stream = await getCameraStream();
 
         const video = videoRef.current;
         if (!video) {
@@ -380,6 +437,7 @@ export default function EventScannerPage() {
         streamRef.current = stream;
         video.srcObject = stream;
         await video.play().catch(() => undefined);
+        checkTorchSupport(stream);
 
         const detector = new BarcodeDetectorCtor({ formats: ["qr_code"] });
         isScanningRef.current = true;
@@ -411,23 +469,34 @@ export default function EventScannerPage() {
         };
 
         animationFrameRef.current = requestAnimationFrame(scanLoop);
-      } catch {
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Camera access failed";
+        setCameraError(message);
         await stopScanning();
       }
 
       return;
     }
 
+    // Fallback to zxing library for browsers without native BarcodeDetector
     try {
       const video = videoRef.current;
       if (!video) return;
+
+      // For zxing, we need to get the stream ourselves for mobile compatibility
+      const stream = await getCameraStream();
+      streamRef.current = stream;
+      video.srcObject = stream;
+      await video.play().catch(() => undefined);
+      checkTorchSupport(stream);
 
       const reader = new BrowserQRCodeReader();
       zxingReaderRef.current = reader;
       isScanningRef.current = true;
       scanningModeRef.current = "zxing";
 
-      await reader.decodeFromVideoDevice(undefined, video, (result, err, controls) => {
+      // Use decodeFromVideoElement instead of decodeFromVideoDevice for better mobile support
+      await reader.decodeFromVideoElement(video, (result, err, controls) => {
         if (!isScanningRef.current) {
           controls.stop();
           return;
@@ -446,7 +515,9 @@ export default function EventScannerPage() {
           }
         }
       });
-    } catch {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Camera access failed";
+      setCameraError(message);
       await stopScanning();
     }
   }
@@ -484,21 +555,25 @@ export default function EventScannerPage() {
             <p className="text-[11px] text-white/70">{headerVenue}</p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setFlashOn((prev) => !prev);
-            }}
-            className={cn(
-              "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium shadow-sm transition-colors",
-              flashOn
-                ? "bg-amber-400 text-amber-900"
-                : "bg-[#1B4D3E]/90 text-emerald-50 hover:bg-[#16352A]"
-            )}
-          >
-            {flashOn ? <Zap className="w-3.5 h-3.5" /> : <ZapOff className="w-3.5 h-3.5" />}
-            <span className="hidden sm:inline">{flashOn ? "Flash on" : "Flash off"}</span>
-          </button>
+          {isTorchSupported ? (
+            <button
+              type="button"
+              onClick={() => {
+                void toggleTorch(!flashOn);
+              }}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium shadow-sm transition-colors",
+                flashOn
+                  ? "bg-amber-400 text-amber-900"
+                  : "bg-[#1B4D3E]/90 text-emerald-50 hover:bg-[#16352A]"
+              )}
+            >
+              {flashOn ? <Zap className="w-3.5 h-3.5" /> : <ZapOff className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">{flashOn ? "Flash on" : "Flash off"}</span>
+            </button>
+          ) : (
+            <div className="w-10 h-10" /> // Placeholder to maintain layout
+          )}
         </div>
 
         {/* Camera Viewfinder Area */}
@@ -526,6 +601,11 @@ export default function EventScannerPage() {
               <p className="text-[10px] text-red-300 mt-1">
                 Camera-based scanning is not supported in this browser. Please try a different
                 device or browser that supports camera access.
+              </p>
+            )}
+            {cameraError && (
+              <p className="text-[10px] text-red-300 mt-1">
+                Camera error: {cameraError}. Please allow camera access in your browser settings and refresh.
               </p>
             )}
           </div>
