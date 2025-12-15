@@ -51,22 +51,87 @@ function getAccessTokenFromRequest(request: NextRequest): string | null {
   return cookieToken ?? null;
 }
 
+function getRefreshTokenFromRequest(request: NextRequest): string | null {
+  return request.cookies.get("refresh-token")?.value ?? null;
+}
+
+function setTokenCookies(
+  response: NextResponse,
+  accessToken: string,
+  refreshToken: string
+): void {
+  const twelveHoursInSeconds = 60 * 60 * 12;
+  const secure = process.env.NODE_ENV === "production";
+
+  response.cookies.set("auth-token", accessToken, {
+    httpOnly: true,
+    secure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: twelveHoursInSeconds,
+  });
+
+  response.cookies.set("refresh-token", refreshToken, {
+    httpOnly: true,
+    secure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: twelveHoursInSeconds,
+  });
+}
+
 export async function GET(request: NextRequest) {
   const accessToken = getAccessTokenFromRequest(request);
+  const refreshToken = getRefreshTokenFromRequest(request);
 
-  if (!accessToken) {
+  if (!accessToken && !refreshToken) {
     return formatError(401, "UNAUTHENTICATED", "Not authenticated.");
   }
 
   const supabase = getAdminSupabaseClient();
 
-  const { data: userResult, error: tokenError } = await supabase.auth.getUser(accessToken);
+  let userId: string;
+  let newAccessToken: string | null = null;
+  let newRefreshToken: string | null = null;
 
-  if (tokenError || !userResult?.user) {
-    return formatError(401, "INVALID_TOKEN", "Session is invalid or expired.");
+  // Try to validate the access token first
+  if (accessToken) {
+    const { data: userResult, error: tokenError } = await supabase.auth.getUser(accessToken);
+
+    if (!tokenError && userResult?.user) {
+      userId = userResult.user.id;
+    } else if (refreshToken) {
+      // Access token is invalid/expired, try to refresh
+      const { data: refreshResult, error: refreshError } = await supabase.auth.refreshSession({
+        refresh_token: refreshToken,
+      });
+
+      if (refreshError || !refreshResult?.session || !refreshResult.user) {
+        return formatError(401, "SESSION_EXPIRED", "Session has expired. Please log in again.");
+      }
+
+      userId = refreshResult.user.id;
+      newAccessToken = refreshResult.session.access_token;
+      newRefreshToken = refreshResult.session.refresh_token;
+    } else {
+      return formatError(401, "INVALID_TOKEN", "Session is invalid or expired.");
+    }
+  } else if (refreshToken) {
+    // No access token but have refresh token, try to refresh
+    const { data: refreshResult, error: refreshError } = await supabase.auth.refreshSession({
+      refresh_token: refreshToken,
+    });
+
+    if (refreshError || !refreshResult?.session || !refreshResult.user) {
+      return formatError(401, "SESSION_EXPIRED", "Session has expired. Please log in again.");
+    }
+
+    userId = refreshResult.user.id;
+    newAccessToken = refreshResult.session.access_token;
+    newRefreshToken = refreshResult.session.refresh_token;
+  } else {
+    return formatError(401, "UNAUTHENTICATED", "Not authenticated.");
   }
-
-  const userId = userResult.user.id;
 
   const { data: appUser, error: appUserError } = await supabase
     .from("app_users")
@@ -99,5 +164,12 @@ export async function GET(request: NextRequest) {
     isActive: Boolean(appUser.is_active),
   };
 
-  return NextResponse.json(formatSuccess({ user: authUser }));
+  const response = NextResponse.json(formatSuccess({ user: authUser }));
+
+  // If tokens were refreshed, update the cookies
+  if (newAccessToken && newRefreshToken) {
+    setTokenCookies(response, newAccessToken, newRefreshToken);
+  }
+
+  return response;
 }

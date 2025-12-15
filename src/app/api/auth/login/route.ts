@@ -168,6 +168,14 @@ export async function POST(request: NextRequest) {
     maxAge: twelveHoursInSeconds,
   });
 
+  response.cookies.set("refresh-token", refreshToken, {
+    httpOnly: true,
+    secure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: twelveHoursInSeconds,
+  });
+
   response.cookies.set("user-id", user.id, {
     httpOnly: true,
     secure,

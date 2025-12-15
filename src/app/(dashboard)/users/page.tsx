@@ -91,13 +91,18 @@ const ROLE_OPTIONS: { value: UserRole; label: string; description: string }[] = 
 ];
 
 const ROLE_BADGE_STYLES: Record<UserRole, string> = {
-  SUPER_ADMIN: "bg-[#1B4D3E] text-white border-[#1B4D3E]",
-  ADMIN: "bg-[#1B4D3E]/80 text-white border-[#1B4D3E]/80",
-  TEACHER: "bg-blue-100 text-blue-700 border-blue-200",
-  STUDENT: "bg-green-100 text-green-700 border-green-200",
-  SCANNER: "bg-purple-100 text-purple-700 border-purple-200",
-  STAFF: "bg-gray-100 text-gray-700 border-gray-200",
-  PARENT: "bg-amber-100 text-amber-700 border-amber-200",
+  SUPER_ADMIN: "bg-primary text-primary-foreground border-primary",
+  ADMIN: "bg-primary/80 text-primary-foreground border-primary/80",
+  TEACHER: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800",
+  STUDENT: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800",
+  SCANNER: "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800",
+  STAFF: "bg-gray-100 dark:bg-gray-800/50 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700",
+  PARENT: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800",
+};
+
+const STATUS_BADGE_STYLES = {
+  active: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800",
+  inactive: "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800",
 };
 
 // ============================================================================
@@ -231,18 +236,20 @@ export default function ManageUsersPage() {
     void loadUsers();
   }, [loadUsers]);
 
-  // Filter users
-  const filteredUsers = users.filter((user) => {
-    const matchesSearch =
-      user.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      user.email.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesRole = roleFilter === "all" || user.primaryRole === roleFilter;
-    const matchesStatus =
-      statusFilter === "all" ||
-      (statusFilter === "active" && user.isActive) ||
-      (statusFilter === "inactive" && !user.isActive);
-    return matchesSearch && matchesRole && matchesStatus;
-  });
+  // Filter and sort users alphabetically by name
+  const filteredUsers = users
+    .filter((user) => {
+      const matchesSearch =
+        user.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        user.email.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesRole = roleFilter === "all" || user.primaryRole === roleFilter;
+      const matchesStatus =
+        statusFilter === "all" ||
+        (statusFilter === "active" && user.isActive) ||
+        (statusFilter === "inactive" && !user.isActive);
+      return matchesSearch && matchesRole && matchesStatus;
+    })
+    .sort((a, b) => a.fullName.localeCompare(b.fullName));
 
   // Handlers
   const handleDownloadTemplate = () => {
@@ -658,22 +665,22 @@ export default function ManageUsersPage() {
         </div>
 
         {/* Users Table */}
-        <div className="bg-card rounded-xl border border-border shadow-sm">
-          <div className="px-4 py-4 sm:px-6">
+        <div className="bg-card rounded-xl border border-border shadow-sm flex flex-col max-h-[calc(100vh-280px)]">
+          <div className="px-4 py-4 sm:px-6 overflow-y-auto flex-1">
             <Table>
-            <TableHeader>
-              <TableRow className="bg-muted">
-                <TableHead className="font-semibold text-foreground">User</TableHead>
-                <TableHead className="font-semibold text-foreground">Role</TableHead>
-                <TableHead className="font-semibold text-foreground">Status</TableHead>
-                <TableHead className="font-semibold text-foreground hidden md:table-cell">
-                  Last Login
-                </TableHead>
-                <TableHead className="font-semibold text-foreground w-[60px]">
-                  Actions
-                </TableHead>
-              </TableRow>
-            </TableHeader>
+              <TableHeader className="sticky top-0 z-10">
+                <TableRow className="bg-muted">
+                  <TableHead className="font-semibold text-foreground bg-muted">User</TableHead>
+                  <TableHead className="font-semibold text-foreground bg-muted">Role</TableHead>
+                  <TableHead className="font-semibold text-foreground bg-muted">Status</TableHead>
+                  <TableHead className="font-semibold text-foreground bg-muted hidden md:table-cell">
+                    Last Login
+                  </TableHead>
+                  <TableHead className="font-semibold text-foreground bg-muted w-[60px]">
+                    Actions
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
             <TableBody>
               {isLoading ? (
                 <TableRow>
@@ -718,11 +725,7 @@ export default function ManageUsersPage() {
                     </TableCell>
                     <TableCell>
                       <Badge
-                        className={
-                          user.isActive
-                            ? "bg-green-100 text-green-700 border-green-200"
-                            : "bg-red-100 text-red-700 border-red-200"
-                        }
+                        className={user.isActive ? STATUS_BADGE_STYLES.active : STATUS_BADGE_STYLES.inactive}
                       >
                         {user.isActive ? "Active" : "Inactive"}
                       </Badge>
@@ -1368,18 +1371,14 @@ export default function ManageUsersPage() {
                   <p className="text-sm text-muted-foreground">{selectedUser.email}</p>
                 </div>
                 <Badge
-                  className={`ml-auto ${
-                    selectedUser.isActive
-                      ? "bg-green-100 text-green-700 border-green-200"
-                      : "bg-red-100 text-red-700 border-red-200"
-                  }`}
+                  className={`ml-auto ${selectedUser.isActive ? STATUS_BADGE_STYLES.active : STATUS_BADGE_STYLES.inactive}`}
                 >
                   {selectedUser.isActive ? "Active" : "Inactive"}
                 </Badge>
               </div>
               {selectedUser.isActive && (
-                <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                  <p className="text-sm text-amber-800">
+                <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+                  <p className="text-sm text-amber-800 dark:text-amber-300">
                     <strong>Warning:</strong> Disabling this user will immediately revoke
                     their access. Any active sessions will be terminated.
                   </p>

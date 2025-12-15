@@ -35,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { UserRole } from "@/core/auth/types";
+import { isAdministrativeRole } from "@/config/roles";
 import { useAuth } from "@/shared/hooks/useAuth";
 import { useTheme } from "next-themes";
 
@@ -117,7 +118,8 @@ export default function DashboardShell({ children, mobileTitle, mobileDescriptio
   const [isMobile, setIsMobile] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const canManageUsers = hasRole(["SUPER_ADMIN", "ADMIN"]);
-  const shouldHideModules = hasRole(["SCANNER", "STUDENT", "PARENT"]);
+  const isAdministrativeUser = user ? isAdministrativeRole(user.roles) : false;
+  const shouldHideModules = !isAdministrativeUser && hasRole(["SCANNER", "STUDENT", "PARENT"]);
   const isStaffUser = hasRole(["STAFF"]);
   const isStudent = hasRole(["STUDENT"]);
   const isScanner = hasRole(["SCANNER"]);

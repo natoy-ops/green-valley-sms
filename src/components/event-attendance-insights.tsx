@@ -1,15 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertTriangle, Activity, Users, Clock, CheckCircle2, Check, ChevronsUpDown } from "lucide-react";
+import { AlertTriangle, Activity, Users, Clock, CheckCircle2, Check, ChevronsUpDown, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { downloadExcelFile } from "@/lib/excel-utils";
+import { toast } from "sonner";
+import ExcelJS from "exceljs";
 
 interface EventSummaryItem {
   id: string;
@@ -189,9 +192,186 @@ export function EventAttendanceInsights({ events }: EventAttendanceInsightsProps
     [stats]
   );
 
+  const generateAttendanceExcel = useCallback(async () => {
+    if (!stats || !selectedEvent) return null;
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "School Management System";
+    workbook.created = new Date();
+
+    // Sheet 1: Summary
+    const summarySheet = workbook.addWorksheet("Summary");
+    summarySheet.columns = [
+      { key: "label", width: 25 },
+      { key: "value", width: 30 }
+    ];
+
+    // Add summary data
+    summarySheet.addRow({ label: "Event", value: stats.eventTitle });
+    summarySheet.addRow({ label: "Date Range", value: `${selectedEvent.startDate} to ${selectedEvent.endDate}` });
+    summarySheet.addRow({ label: "Export Date", value: new Date().toLocaleString() });
+    summarySheet.addRow({ label: "", value: "" }); // Blank row
+    summarySheet.addRow({ label: "Total Students", value: stats.uniqueStudents });
+    summarySheet.addRow({ label: "Total Scans", value: stats.totalScans });
+    summarySheet.addRow({ label: "Present", value: stats.totalPresent });
+    summarySheet.addRow({ label: "Late", value: stats.totalLate });
+    summarySheet.addRow({ label: "Absent", value: stats.totalAbsent });
+    summarySheet.addRow({ label: "Overall Attendance Rate", value: `${totalRate}%` });
+
+    // Style the summary sheet
+    summarySheet.getColumn(1).font = { bold: true };
+    summarySheet.getRow(1).font = { bold: true, size: 12 };
+
+    // Sheet 2: Session Breakdown
+    const sessionSheet = workbook.addWorksheet("Session Breakdown");
+    sessionSheet.columns = [
+      { header: "Period", key: "period", width: 15 },
+      { header: "Entry Session", key: "entrySession", width: 20 },
+      { header: "Entry Scans", key: "entryScans", width: 12 },
+      { header: "Entry Present", key: "entryPresent", width: 14 },
+      { header: "Entry Late", key: "entryLate", width: 12 },
+      { header: "Exit Session", key: "exitSession", width: 20 },
+      { header: "Exit Scans", key: "exitScans", width: 12 },
+      { header: "Exit Present", key: "exitPresent", width: 14 },
+      { header: "Exit Late", key: "exitLate", width: 12 },
+      { header: "Missing Out", key: "missingOut", width: 12 }
+    ];
+
+    for (const period of stats.periods) {
+      const periodLabel = period.period.charAt(0).toUpperCase() + period.period.slice(1);
+      const inSession = period.inSession;
+      const outSession = period.outSession;
+
+      sessionSheet.addRow({
+        period: periodLabel,
+        entrySession: inSession?.name ?? "—",
+        entryScans: inSession?.totalScans ?? 0,
+        entryPresent: inSession?.present ?? 0,
+        entryLate: inSession?.late ?? 0,
+        exitSession: outSession?.name ?? "—",
+        exitScans: outSession?.totalScans ?? 0,
+        exitPresent: outSession?.present ?? 0,
+        exitLate: outSession?.late ?? 0,
+        missingOut: period.missingOutCount ?? 0
+      });
+    }
+
+    // Style the session sheet header
+    sessionSheet.getRow(1).font = { bold: true };
+    sessionSheet.getRow(1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE0E0E0" }
+    };
+
+    // Sheet 3: Student Attendance
+    const studentSheet = workbook.addWorksheet("Student Attendance");
+
+    // Build dynamic columns
+    const studentColumns: Array<{ header: string; key: string; width: number }> = [
+      { header: "Student Name", key: "name", width: 25 },
+      { header: "Grade", key: "grade", width: 10 },
+      { header: "Section", key: "section", width: 12 }
+    ];
+
+    // Add session columns
+    for (const col of sessionColumns) {
+      studentColumns.push({
+        header: col.label,
+        key: `session_${col.id}`,
+        width: 15
+      });
+    }
+
+    // Add summary columns
+    studentColumns.push(
+      { header: "Total Present", key: "totalPresent", width: 12 },
+      { header: "Total Late", key: "totalLate", width: 12 },
+      { header: "Total Absent", key: "totalAbsent", width: 12 },
+      { header: "Attendance Rate", key: "attendanceRate", width: 15 }
+    );
+
+    studentSheet.columns = studentColumns;
+
+    // Add student data
+    for (const student of stats.students) {
+      const rowData: Record<string, string | number> = {
+        name: student.fullName,
+        grade: student.gradeLevel ?? "—",
+        section: student.section ?? "—"
+      };
+
+      let presentCount = 0;
+      let lateCount = 0;
+      let absentCount = 0;
+
+      for (const col of sessionColumns) {
+        const status = student.sessions[col.id] ?? "none";
+        let statusText = "—";
+
+        if (status === "present") {
+          statusText = "Present";
+          presentCount++;
+        } else if (status === "late") {
+          statusText = "Late";
+          lateCount++;
+        } else if (status === "no_scan") {
+          statusText = "No Scan";
+          absentCount++;
+        }
+
+        rowData[`session_${col.id}`] = statusText;
+      }
+
+      // Calculate student's attendance rate
+      const totalSessions = presentCount + lateCount + absentCount;
+      const studentRate = totalSessions > 0
+        ? Math.round(((presentCount + lateCount) / totalSessions) * 100)
+        : 0;
+
+      rowData.totalPresent = presentCount;
+      rowData.totalLate = lateCount;
+      rowData.totalAbsent = absentCount;
+      rowData.attendanceRate = `${studentRate}%`;
+
+      studentSheet.addRow(rowData);
+    }
+
+    // Style the student sheet header
+    studentSheet.getRow(1).font = { bold: true };
+    studentSheet.getRow(1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE0E0E0" }
+    };
+
+    return workbook;
+  }, [stats, selectedEvent, sessionColumns, totalRate]);
+
+  const handleExportExcel = useCallback(async () => {
+    if (!stats || !selectedEvent) return;
+
+    try {
+      const workbook = await generateAttendanceExcel();
+      if (!workbook) return;
+
+      // Sanitize event title for filename
+      const sanitizedTitle = stats.eventTitle.replace(/[^a-z0-9]/gi, '_');
+      const dateStr = new Date().toISOString().split('T')[0];
+      const filename = `${sanitizedTitle}_Attendance_${dateStr}.xlsx`;
+
+      await downloadExcelFile(filename, workbook);
+
+      toast.success("Attendance data exported successfully");
+    } catch (error) {
+      console.error("Export error:", error);
+      toast.error("Failed to export attendance data");
+    }
+  }, [stats, selectedEvent, generateAttendanceExcel]);
+
   if (!hasEvents) {
     return (
-      <Card className="mt-4 border-dashed border-border/60 bg-card/60">
+      <Card className="border-dashed border-border/60 bg-card/60">
         <CardHeader>
           <CardTitle className="text-base">Event Attendance Insights</CardTitle>
           <CardDescription>No events available yet. Create an event to see attendance insights.</CardDescription>
@@ -201,7 +381,7 @@ export function EventAttendanceInsights({ events }: EventAttendanceInsightsProps
   }
 
   return (
-    <Card className="md:mr-6 md:ml-6 ml-4 mr-4 border-border/60 bg-gradient-to-br from-card via-card to-muted/10">
+    <Card className="border-border/60 bg-gradient-to-br from-card via-card to-muted/10">
       <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between border-b border-border/60 pb-4">
         <div>
           <CardTitle className="text-base flex items-center gap-2">
@@ -212,7 +392,7 @@ export function EventAttendanceInsights({ events }: EventAttendanceInsightsProps
             Per-session breakdown of scans, late arrivals, and missing outs for a selected event.
           </CardDescription>
         </div>
-        <div className="flex items-center gap-3 w-full md:w-auto">
+        <div className="flex items-center gap-3 w-full md:w-auto flex-wrap">
           {selectedEvent && (
             <Badge variant="outline" className="hidden md:inline-flex items-center gap-1 text-[11px]">
               <span
@@ -285,6 +465,16 @@ export function EventAttendanceInsights({ events }: EventAttendanceInsightsProps
               </Command>
             </PopoverContent>
           </Popover>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportExcel}
+            disabled={!stats || isLoading || !!error}
+            className="gap-2"
+          >
+            <Download className="w-4 h-4" />
+            Export Report
+          </Button>
         </div>
       </CardHeader>
 
