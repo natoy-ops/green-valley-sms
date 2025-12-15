@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { canAccessRoute, getDefaultRouteForRoles } from "@/core/auth/routeAccess";
 import type { UserRole } from "@/core/auth/types";
 
-const PUBLIC_PATHS = ["/login"];
+const PUBLIC_PATHS = ["/login", "/events"];
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
