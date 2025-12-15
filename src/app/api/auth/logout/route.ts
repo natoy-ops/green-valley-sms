@@ -24,6 +24,7 @@ export async function POST() {
   };
 
   response.cookies.set("auth-token", "", cookieOptions);
+  response.cookies.set("refresh-token", "", cookieOptions);
   response.cookies.set("user-id", "", cookieOptions);
   response.cookies.set("user-roles", "", cookieOptions);
   response.cookies.set("school-id", "", cookieOptions);

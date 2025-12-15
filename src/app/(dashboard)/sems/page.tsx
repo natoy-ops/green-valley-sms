@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Calendar as CalendarIcon, ShieldAlert, X, QrCode, Users, ChevronDown, ChevronRight, Search, Minus, UserX, Check, Megaphone, AlertTriangle, Building2, MapPin, Trash2 } from "lucide-react";
+import { Calendar as CalendarIcon, ShieldAlert, X, QrCode, Users, ChevronDown, ChevronRight, Search, Minus, UserX, Check, Megaphone, AlertTriangle, Building2, MapPin, Trash2, CalendarDays, BarChart3 } from "lucide-react";
 import { VenueCard, type VenueAvailabilityStatus, type SessionConflict } from "@/components/venue-card";
 import { EventAttendanceInsights } from "@/components/event-attendance-insights";
 import { useRouter } from "next/navigation";
 import { format, eachDayOfInterval, isSameDay, isBefore, startOfToday } from "date-fns";
 import type { DateRange } from "react-day-picker";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -701,6 +702,69 @@ export default function EventsPage() {
       isCancelled = true;
     };
   }, []);
+
+  // Lock background scroll when the Create/Edit Event dialog is open
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const originalOverflow = document.body.style.overflow;
+
+    if (isCreateDialogOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = originalOverflow;
+    }
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [isCreateDialogOpen]);
+
+  // Load levels and sections when dialog opens
+  useEffect(() => {
+    if (!isCreateDialogOpen) return;
+    if (levels.length > 0) return; // Already loaded
+
+    let isCancelled = false;
+
+    async function loadLevelsAndSections() {
+      setIsLoadingLevels(true);
+
+      try {
+        const response = await fetch("/api/sis/levels", { method: "GET" });
+
+        if (shouldRedirectToLogin(response)) return;
+
+        const body = (await response.json().catch(() => null)) as {
+          success?: boolean;
+          data?: { levels: LevelDto[]; sections: SectionDto[] };
+          error?: { message?: string };
+        } | null;
+
+        if (!response.ok || !body?.success || !body.data) {
+          console.error("[EventsPage] Failed to load levels:", body?.error?.message);
+          return;
+        }
+
+        if (!isCancelled) {
+          setLevels(body.data.levels);
+          setSections(body.data.sections);
+        }
+      } catch (error) {
+        console.error("[EventsPage] Failed to load levels", error);
+      } finally {
+        if (!isCancelled) {
+          setIsLoadingLevels(false);
+        }
+      }
+    }
+
+    void loadLevelsAndSections();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [isCreateDialogOpen, levels.length]);
 
   const roleSignature = useMemo(() => (user?.roles ?? []).join("|"), [user?.roles]);
 
@@ -2208,13 +2272,26 @@ export default function EventsPage() {
           </div>
         </div>
 
-        <Card className="flex-1 flex flex-col w-full border-border shadow-sm">
-          <CardHeader className="border-b border-border/80 pb-4 bg-card/95">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <CardTitle className="text-lg font-bold text-foreground">List of Events</CardTitle>
-                <CardDescription>Events scheduled for today with live status.</CardDescription>
-              </div>
+        <Tabs defaultValue="events" className="flex-1 flex flex-col">
+          <TabsList className="w-full justify-start bg-muted/50 border border-border rounded-lg p-1 mb-4">
+            <TabsTrigger value="events" className="gap-2 data-[state=active]:bg-background data-[state=active]:shadow-sm">
+              <CalendarDays className="w-4 h-4" />
+              List of Events
+            </TabsTrigger>
+            <TabsTrigger value="insights" className="gap-2 data-[state=active]:bg-background data-[state=active]:shadow-sm">
+              <BarChart3 className="w-4 h-4" />
+              Attendance Insights
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="events" className="flex-1 flex flex-col mt-0">
+            <Card className="flex-1 flex flex-col w-full border-border shadow-sm">
+              <CardHeader className="border-b border-border/80 pb-4 bg-card/95">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <CardTitle className="text-lg font-bold text-foreground">List of Events</CardTitle>
+                    <CardDescription>Events scheduled for today with live status.</CardDescription>
+                  </div>
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:gap-2 w-full">
                 {eventSelectionState.hasSelection && (
                   <span className="text-xs text-muted-foreground">
@@ -2488,24 +2565,28 @@ export default function EventsPage() {
               </Table>
             </div>
           </CardContent>
-        </Card>
-      </div>
+            </Card>
+          </TabsContent>
 
-      <EventAttendanceInsights events={eventsList.map((event) => ({
-        id: event.id,
-        title: event.title,
-        startDate: event.startDate,
-        endDate: event.endDate,
-        status: event.status,
-      }))}
-      />
+          <TabsContent value="insights" className="flex-1 flex flex-col mt-0">
+            <EventAttendanceInsights events={eventsList.map((event) => ({
+              id: event.id,
+              title: event.title,
+              startDate: event.startDate,
+              endDate: event.endDate,
+              status: event.status,
+            }))}
+            />
+          </TabsContent>
+        </Tabs>
+      </div>
 
       {isCreateDialogOpen && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 backdrop-blur-sm dialog-backdrop-animate">
-          <div className="bg-card rounded-2xl shadow-xl w-full max-w-2xl border border-border/50 dialog-panel-animate">
+          <div className="bg-card rounded-2xl shadow-xl w-full max-w-5xl lg:w-[1100px] border border-border/50 dialog-panel-animate max-h-[90vh] flex flex-col">
             <div className="flex items-start justify-between px-6 pt-5 pb-3 border-b border-border/50">
               <div>
-                <h2 className="text-lg font-bold text-foreground">
+                <h2 className="text-xl font-bold text-foreground">
                   {isEditMode ? "Edit Event" : "Create Event"}
                 </h2>
                 <p className="text-sm text-muted-foreground">
@@ -2528,7 +2609,7 @@ export default function EventsPage() {
             </div>
 
             <form
-              className="px-6 pb-5 pt-4 space-y-6 max-h-[70vh] overflow-y-auto hide-scrollbar"
+              className="px-6 pb-5 pt-4 space-y-6 overflow-y-auto flex-1"
               onSubmit={handleEventFormSubmit}
             >
               {/* Loading state for edit mode */}

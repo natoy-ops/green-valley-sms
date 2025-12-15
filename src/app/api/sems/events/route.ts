@@ -90,6 +90,16 @@ function parseCreateRequestBody(body: unknown): CreateEventDto | null {
     // Will be caught by validation
   }
 
+  try {
+    if (typeof data.scannerConfigJson === "string") {
+      scannerConfig = JSON.parse(data.scannerConfigJson) as EventScannerConfig;
+    } else if (data.scannerConfig && typeof data.scannerConfig === "object") {
+      scannerConfig = data.scannerConfig as EventScannerConfig;
+    }
+  } catch {
+    // Will be caught by validation
+  }
+
   const visibility =
     typeof data.visibility === "string" ? (data.visibility as EventVisibility) : ("internal" as EventVisibility);
 

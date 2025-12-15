@@ -1,13 +1,15 @@
 "use client";
 
 import type React from "react";
-import { useEffect, useState } from "react";
-import { Users, X, FileSpreadsheet, FileText, Download, ChevronDown, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Users, UsersRound, X, FileSpreadsheet, FileText, Download, ChevronDown, Loader2, Settings, Layers, LayoutGrid, GraduationCap, UserCheck, TrendingUp, Pencil } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 type StudentStatus = "Active" | "Inactive" | "Pending";
 
@@ -33,6 +35,22 @@ type GuardianCredential = {
   email: string;
   temporaryPassword: string;
   linkedStudents: string[];
+};
+
+type GuardianRecord = {
+  id: string;
+  email: string;
+  fullName: string;
+  isActive: boolean;
+  linkedStudents: {
+    studentId: string;
+    studentName: string;
+    lrn: string;
+    grade: string;
+    section: string;
+    relationship: string | null;
+    isPrimary: boolean;
+  }[];
 };
 
 type LevelOption = {
@@ -102,6 +120,7 @@ export default function RegistryPage() {
   const [editStudentSectionName, setEditStudentSectionName] = useState<string>("");
   const [editStudentStatus, setEditStudentStatus] = useState<StudentStatus>("Active");
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [isManageMenuOpen, setIsManageMenuOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [studentCredentialsForDownload, setStudentCredentialsForDownload] = useState<
     StudentCredential[]
@@ -112,6 +131,24 @@ export default function RegistryPage() {
   const [bulkImportStatus, setBulkImportStatus] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
+
+  // Guardians state
+  const [guardians, setGuardians] = useState<GuardianRecord[]>([]);
+  const [isLoadingGuardians, setIsLoadingGuardians] = useState(false);
+  const [guardiansError, setGuardiansError] = useState<string | null>(null);
+  const [guardianSearchTerm, setGuardianSearchTerm] = useState("");
+  const [isEditGuardianDialogOpen, setIsEditGuardianDialogOpen] = useState(false);
+  const [editGuardian, setEditGuardian] = useState<GuardianRecord | null>(null);
+  const [editGuardianFullName, setEditGuardianFullName] = useState("");
+  const [editGuardianEmail, setEditGuardianEmail] = useState("");
+  const [editGuardianIsActive, setEditGuardianIsActive] = useState(true);
+  const [isUpdatingGuardian, setIsUpdatingGuardian] = useState(false);
+  const [editGuardianError, setEditGuardianError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<string>("students");
+
+  // Insight detail dialogs
+  type InsightDialogType = "total" | "active" | "grade" | "section" | null;
+  const [activeInsightDialog, setActiveInsightDialog] = useState<InsightDialogType>(null);
 
   const downloadCsvFile = (filename: string, headers: string[], rows: string[][]) => {
     if (typeof window === "undefined" || rows.length === 0) return;
@@ -435,6 +472,149 @@ export default function RegistryPage() {
       isCancelled = true;
     };
   }, []);
+
+  // Load guardians when switching to parents tab
+  useEffect(() => {
+    if (activeTab !== "parents") return;
+    if (guardians.length > 0) return; // Already loaded
+
+    let isCancelled = false;
+
+    async function loadGuardians() {
+      setIsLoadingGuardians(true);
+      setGuardiansError(null);
+
+      try {
+        const response = await fetch("/api/sis/guardians", {
+          method: "GET",
+        });
+
+        if (shouldRedirectToLogin(response)) {
+          return;
+        }
+
+        const body = (await response.json().catch(() => null)) as
+          | {
+              success?: boolean;
+              data?: { guardians: GuardianRecord[] };
+              error?: { message?: string };
+            }
+          | null;
+
+        if (!response.ok || !body || !body.success || !body.data) {
+          const message = body?.error?.message ?? "Unable to load guardians.";
+          throw new Error(message);
+        }
+
+        if (!isCancelled) {
+          setGuardians(body.data.guardians);
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setGuardiansError(
+            error instanceof Error ? error.message : "Unable to load guardians."
+          );
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoadingGuardians(false);
+        }
+      }
+    }
+
+    void loadGuardians();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeTab, guardians.length]);
+
+  async function handleEditGuardianSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (isUpdatingGuardian) return;
+    if (!editGuardian) return;
+
+    setEditGuardianError(null);
+
+    const rawFullName = editGuardianFullName.trim();
+    const rawEmail = editGuardianEmail.trim();
+
+    if (!rawFullName) {
+      setEditGuardianError("Full name is required.");
+      return;
+    }
+
+    if (!rawEmail) {
+      setEditGuardianError("Email is required.");
+      return;
+    }
+
+    setIsUpdatingGuardian(true);
+
+    try {
+      const response = await fetch("/api/sis/guardians", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id: editGuardian.id,
+          fullName: rawFullName,
+          email: rawEmail,
+          isActive: editGuardianIsActive,
+        }),
+      });
+
+      if (shouldRedirectToLogin(response)) {
+        return;
+      }
+
+      const body = (await response.json().catch(() => null)) as
+        | {
+            success?: boolean;
+            data?: { guardian: GuardianRecord };
+            error?: { message?: string };
+          }
+        | null;
+
+      if (!response.ok || !body?.success || !body.data) {
+        const message = body?.error?.message ?? "Unable to update guardian. Please try again.";
+        throw new Error(message);
+      }
+
+      const updatedGuardian = body.data.guardian;
+      setGuardians((previous) =>
+        previous.map((g) => (g.id === updatedGuardian.id ? updatedGuardian : g))
+      );
+
+      setIsEditGuardianDialogOpen(false);
+      setEditGuardian(null);
+    } catch (error) {
+      setEditGuardianError(
+        error instanceof Error
+          ? error.message
+          : "Unable to update guardian. Please try again."
+      );
+    } finally {
+      setIsUpdatingGuardian(false);
+    }
+  }
+
+  const filteredGuardians = guardians
+    .filter((guardian) => {
+      if (guardianSearchTerm.trim()) {
+        const q = guardianSearchTerm.toLowerCase();
+        const studentNames = guardian.linkedStudents.map((s) => s.studentName.toLowerCase()).join(" ");
+        return (
+          guardian.fullName.toLowerCase().includes(q) ||
+          guardian.email.toLowerCase().includes(q) ||
+          studentNames.includes(q)
+        );
+      }
+      return true;
+    })
+    .sort((a, b) => a.fullName.localeCompare(b.fullName));
 
   async function handleDisableSectionClick() {
     const id = editSectionId.trim();
@@ -977,21 +1157,105 @@ export default function RegistryPage() {
     }
   }
 
-  const filteredStudents = students.filter((student) => {
-    if (levelFilter !== "all" && student.grade !== levelFilter) return false;
-    if (sectionFilter !== "all" && student.section !== sectionFilter) return false;
+  const filteredStudents = students
+    .filter((student) => {
+      if (levelFilter !== "all" && student.grade !== levelFilter) return false;
+      if (sectionFilter !== "all" && student.section !== sectionFilter) return false;
 
-    if (searchTerm.trim()) {
-      const q = searchTerm.toLowerCase();
-      return (
-        student.name.toLowerCase().includes(q) ||
-        student.lrn.toLowerCase().includes(q) ||
-        `${student.grade}-${student.section}`.toLowerCase().includes(q)
-      );
-    }
+      if (searchTerm.trim()) {
+        const q = searchTerm.toLowerCase();
+        return (
+          student.name.toLowerCase().includes(q) ||
+          student.lrn.toLowerCase().includes(q) ||
+          `${student.grade}-${student.section}`.toLowerCase().includes(q)
+        );
+      }
 
-    return true;
-  });
+      return true;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  // Calculate registry insights
+  const registryInsights = useMemo(() => {
+    const totalStudents = students.length;
+    const activeStudents = students.filter((s) => s.status === "Active").length;
+    const inactiveStudents = students.filter((s) => s.status === "Inactive").length;
+    const pendingStudents = students.filter((s) => s.status === "Pending").length;
+    const totalSections = sections.length;
+    const totalLevels = levels.length;
+
+    // Count students per grade with status breakdown
+    const gradeMap = new Map<string, { total: number; active: number; inactive: number; pending: number }>();
+
+    // Initialize with all levels (even those with 0 students)
+    levels.forEach((level) => {
+      gradeMap.set(level.name, { total: 0, active: 0, inactive: 0, pending: 0 });
+    });
+
+    // Add student counts
+    students.forEach((s) => {
+      const existing = gradeMap.get(s.grade) || { total: 0, active: 0, inactive: 0, pending: 0 };
+      existing.total += 1;
+      if (s.status === "Active") existing.active += 1;
+      else if (s.status === "Inactive") existing.inactive += 1;
+      else if (s.status === "Pending") existing.pending += 1;
+      gradeMap.set(s.grade, existing);
+    });
+
+    // Count students per section with status breakdown
+    const sectionMap = new Map<string, { grade: string; section: string; total: number; active: number; inactive: number; pending: number }>();
+
+    // Initialize with all sections (even those with 0 students)
+    sections.forEach((section) => {
+      const levelName = levels.find((l) => l.id === section.levelId)?.name || "Unassigned";
+      const key = `${levelName}-${section.name}`;
+      sectionMap.set(key, { grade: levelName, section: section.name, total: 0, active: 0, inactive: 0, pending: 0 });
+    });
+
+    // Add student counts
+    students.forEach((s) => {
+      const key = `${s.grade}-${s.section}`;
+      const existing = sectionMap.get(key) || { grade: s.grade, section: s.section, total: 0, active: 0, inactive: 0, pending: 0 };
+      existing.total += 1;
+      if (s.status === "Active") existing.active += 1;
+      else if (s.status === "Inactive") existing.inactive += 1;
+      else if (s.status === "Pending") existing.pending += 1;
+      sectionMap.set(key, existing);
+    });
+
+    // Convert to sorted arrays (by total count descending)
+    const gradeBreakdown = Array.from(gradeMap.entries())
+      .map(([grade, data]) => ({ grade, ...data }))
+      .sort((a, b) => b.total - a.total);
+
+    const sectionBreakdown = Array.from(sectionMap.values())
+      .sort((a, b) => b.total - a.total);
+
+    // Find top grade by student count (only those with students)
+    const gradesWithStudents = gradeBreakdown.filter((g) => g.total > 0);
+    const topGrade = gradesWithStudents.length > 0
+      ? { name: gradesWithStudents[0].grade, count: gradesWithStudents[0].total }
+      : { name: "N/A", count: 0 };
+
+    // Find top section by student count (only those with students)
+    const sectionsWithStudents = sectionBreakdown.filter((s) => s.total > 0);
+    const topSection = sectionsWithStudents.length > 0
+      ? { name: sectionsWithStudents[0].section, grade: sectionsWithStudents[0].grade, count: sectionsWithStudents[0].total }
+      : { name: "N/A", grade: "", count: 0 };
+
+    return {
+      totalStudents,
+      activeStudents,
+      inactiveStudents,
+      pendingStudents,
+      totalSections,
+      totalLevels,
+      topGrade,
+      topSection,
+      gradeBreakdown,
+      sectionBreakdown,
+    };
+  }, [students, sections, levels]);
 
   const addStudentSectionsForSelectedLevel = addStudentLevelName
     ? getSectionsForLevelName(addStudentLevelName)
@@ -1037,109 +1301,162 @@ export default function RegistryPage() {
   return (
     <>
     <div className="flex-1 flex flex-col space-y-6 min-h-0 overflow-y-auto hide-scrollbar px-4 py-4 sm:px-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex items-start gap-3 w-full">
-          <div className="hidden sm:flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700">
-            <Users className="w-5 h-5" />
+      {/* Header Section */}
+      <div className="flex flex-col gap-4">
+        {/* Title and Actions Row */}
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+          {/* Title */}
+          <div className="flex items-start gap-3 shrink-0">
+            <div className="hidden sm:flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-400">
+              <Users className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="text-xl sm:text-2xl font-bold text-foreground">Student Registry</h1>
+              <p className="text-sm text-muted-foreground">
+                Central record of enrolled students, organized by grade and section.
+              </p>
+              {studentsError && (
+                <p className="mt-1 text-xs text-red-600">{studentsError}</p>
+              )}
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-foreground">Student Registry (SIS)</h1>
-            <p className="text-sm text-muted-foreground">
-              Central record of enrolled students, organized by grade and section.
-            </p>
-            {studentsError && (
-              <p className="mt-1 text-xs text-red-600">{studentsError}</p>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2 w-full lg:w-auto lg:flex-nowrap lg:items-center lg:gap-3 lg:justify-end">
-          <Button
-            type="button"
-            className="bg-card border border-border text-muted-foreground hover:bg-muted text-sm px-4 py-2 rounded-lg shadow-sm w-full sm:w-auto lg:w-auto"
-            onClick={() => setIsBulkImportDialogOpen(true)}
-          >
-            Bulk Import
-          </Button>
-          
-          {/* Export QR Codes Dropdown */}
-          <div className="relative w-full sm:w-auto lg:w-auto">
+
+          {/* Action Buttons */}
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
-              className="bg-card border border-border text-muted-foreground hover:bg-muted text-sm px-4 py-2 rounded-lg shadow-sm inline-flex items-center gap-1.5 w-full"
-              onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
-              disabled={isExporting || students.length === 0}
+              variant="outline"
+              size="sm"
+              className="text-sm"
+              onClick={() => setIsBulkImportDialogOpen(true)}
             >
-              <Download className="w-4 h-4" />
-              {isExporting ? "Exporting..." : "Export QR"}
-              <ChevronDown className="w-3.5 h-3.5" />
+              Bulk Import
             </Button>
-            
-            {isExportMenuOpen && (
-              <>
-                {/* Backdrop to close menu */}
-                <div 
-                  className="fixed inset-0 z-10" 
-                  onClick={() => setIsExportMenuOpen(false)} 
-                />
-                
-                {/* Dropdown menu */}
-                <div className="absolute right-0 mt-1 w-52 bg-card rounded-lg shadow-lg border border-border py-1 z-20">
-                  <button
-                    type="button"
-                    className="w-full px-4 py-2.5 text-left text-sm text-muted-foreground hover:bg-muted flex items-center gap-3"
-                    onClick={() => void handleExportQrCodes("excel")}
-                  >
-                    <FileSpreadsheet className="w-4 h-4 text-green-600" />
-                    <div>
-                      <div className="font-medium">Excel (.xlsx)</div>
-                      <div className="text-xs text-muted-foreground">Spreadsheet with QR images</div>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    className="w-full px-4 py-2.5 text-left text-sm text-muted-foreground hover:bg-muted flex items-center gap-3"
-                    onClick={() => void handleExportQrCodes("word")}
-                  >
-                    <FileText className="w-4 h-4 text-blue-600" />
-                    <div>
-                      <div className="font-medium">Word (.docx)</div>
-                      <div className="text-xs text-muted-foreground">Printable ID cards</div>
-                    </div>
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-          
-          <div className="flex flex-col gap-2 sm:flex-row sm:gap-2 w-full sm:w-auto lg:flex-nowrap lg:gap-2">
+
+            {/* Export QR Codes Dropdown */}
+            <div className="relative">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="text-sm inline-flex items-center gap-1.5"
+                onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+                disabled={isExporting || students.length === 0}
+              >
+                <Download className="w-4 h-4" />
+                {isExporting ? "Exporting..." : "Export QR"}
+                <ChevronDown className="w-3.5 h-3.5" />
+              </Button>
+
+              {isExportMenuOpen && (
+                <>
+                  {/* Backdrop to close menu */}
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setIsExportMenuOpen(false)}
+                  />
+
+                  {/* Dropdown menu */}
+                  <div className="absolute right-0 mt-1 w-52 bg-card rounded-lg shadow-lg border border-border py-1 z-20">
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2.5 text-left text-sm text-muted-foreground hover:bg-muted flex items-center gap-3"
+                      onClick={() => void handleExportQrCodes("excel")}
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-green-600" />
+                      <div>
+                        <div className="font-medium">Excel (.xlsx)</div>
+                        <div className="text-xs text-muted-foreground">Spreadsheet with QR images</div>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2.5 text-left text-sm text-muted-foreground hover:bg-muted flex items-center gap-3"
+                      onClick={() => void handleExportQrCodes("word")}
+                    >
+                      <FileText className="w-4 h-4 text-blue-600" />
+                      <div>
+                        <div className="font-medium">Word (.docx)</div>
+                        <div className="text-xs text-muted-foreground">Printable ID cards</div>
+                      </div>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Manage Dropdown */}
+            <div className="relative">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="text-sm inline-flex items-center gap-1.5"
+                onClick={() => setIsManageMenuOpen(!isManageMenuOpen)}
+              >
+                <Settings className="w-4 h-4" />
+                Manage
+                <ChevronDown className="w-3.5 h-3.5" />
+              </Button>
+
+              {isManageMenuOpen && (
+                <>
+                  {/* Backdrop to close menu */}
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setIsManageMenuOpen(false)}
+                  />
+
+                  {/* Dropdown menu */}
+                  <div className="absolute right-0 mt-1 w-48 bg-card rounded-lg shadow-lg border border-border py-1 z-20">
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2.5 text-left text-sm text-muted-foreground hover:bg-muted flex items-center gap-3"
+                      onClick={() => {
+                        setIsLevelDialogOpen(true);
+                        setIsManageMenuOpen(false);
+                      }}
+                    >
+                      <Layers className="w-4 h-4 text-blue-500" />
+                      <div>
+                        <div className="font-medium">Levels</div>
+                        <div className="text-xs text-muted-foreground">Grade levels & years</div>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2.5 text-left text-sm text-muted-foreground hover:bg-muted flex items-center gap-3"
+                      onClick={() => {
+                        setIsSectionDialogOpen(true);
+                        setIsManageMenuOpen(false);
+                      }}
+                    >
+                      <LayoutGrid className="w-4 h-4 text-purple-500" />
+                      <div>
+                        <div className="font-medium">Sections</div>
+                        <div className="text-xs text-muted-foreground">Class sections</div>
+                      </div>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
             <Button
               type="button"
-              className="bg-card border border-border text-muted-foreground hover:bg-muted text-sm px-4 py-2 rounded-lg shadow-sm w-full sm:w-auto"
-              onClick={() => setIsLevelDialogOpen(true)}
+              size="sm"
+              className="bg-primary text-primary-foreground hover:bg-primary/90 text-sm"
+              onClick={() => {
+                setAddStudentError(null);
+                setAddStudentLevelName("");
+                setAddStudentSectionName("");
+                setAddStudentStatus("Active");
+                setIsAddStudentDialogOpen(true);
+              }}
             >
-              Manage Levels
-            </Button>
-            <Button
-              type="button"
-              className="bg-card border border-border text-muted-foreground hover:bg-muted text-sm px-4 py-2 rounded-lg shadow-sm w-full sm:w-auto"
-              onClick={() => setIsSectionDialogOpen(true)}
-            >
-              Manage Sections
+              + Add Student
             </Button>
           </div>
-          <Button
-            type="button"
-            className="bg-[#1B4D3E] text-white hover:bg-[#163e32] text-sm px-4 py-2 rounded-lg shadow-sm w-full sm:w-auto"
-            onClick={() => {
-              setAddStudentError(null);
-              setAddStudentLevelName("");
-              setAddStudentSectionName("");
-              setAddStudentStatus("Active");
-              setIsAddStudentDialogOpen(true);
-            }}
-          >
-            + Add Student
-          </Button>
         </div>
       </div>
 
@@ -1228,8 +1545,114 @@ export default function RegistryPage() {
           </Alert>
         )}
 
-      <Card className="flex-1 flex flex-col w-full border-border shadow-sm">
-        <CardHeader className="border-b border-gray-50 pb-4">
+      {/* Tabs for Students and Parents */}
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
+        <TabsList className="w-fit mb-4">
+          <TabsTrigger value="students" className="gap-2">
+            <Users className="h-4 w-4" />
+            Students
+          </TabsTrigger>
+          <TabsTrigger value="parents" className="gap-2">
+            <UsersRound className="h-4 w-4" />
+            Parents
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="students" className="flex-1 flex flex-col space-y-6 min-h-0 mt-0">
+      {/* Registry Insights */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Card
+          className="border-border/50 shadow-sm cursor-pointer hover:border-blue-300 hover:shadow-md transition-all"
+          onClick={() => setActiveInsightDialog("total")}
+        >
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 dark:bg-blue-900/20">
+                <Users className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground truncate">Total Students</p>
+                <p className="text-xl font-bold text-foreground">{registryInsights.totalStudents}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card
+          className="border-border/50 shadow-sm cursor-pointer hover:border-emerald-300 hover:shadow-md transition-all"
+          onClick={() => setActiveInsightDialog("active")}
+        >
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 dark:bg-emerald-900/20">
+                <UserCheck className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground truncate">Active Students</p>
+                <p className="text-xl font-bold text-foreground">
+                  {registryInsights.activeStudents}
+                  <span className="text-xs font-normal text-muted-foreground ml-1">
+                    ({registryInsights.totalStudents > 0
+                      ? Math.round((registryInsights.activeStudents / registryInsights.totalStudents) * 100)
+                      : 0}%)
+                  </span>
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card
+          className="border-border/50 shadow-sm cursor-pointer hover:border-purple-300 hover:shadow-md transition-all"
+          onClick={() => setActiveInsightDialog("grade")}
+        >
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-purple-50 dark:bg-purple-900/20">
+                <GraduationCap className="h-5 w-5 text-purple-600 dark:text-purple-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground truncate">Most Populated Grade</p>
+                <p className="text-xl font-bold text-foreground truncate">
+                  {registryInsights.topGrade.name}
+                  {registryInsights.topGrade.count > 0 && (
+                    <span className="text-xs font-normal text-muted-foreground ml-1">
+                      ({registryInsights.topGrade.count})
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card
+          className="border-border/50 shadow-sm cursor-pointer hover:border-amber-300 hover:shadow-md transition-all"
+          onClick={() => setActiveInsightDialog("section")}
+        >
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-50 dark:bg-amber-900/20">
+                <TrendingUp className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground truncate">Most Populated Section</p>
+                <p className="text-xl font-bold text-foreground truncate">
+                  {registryInsights.topSection.name}
+                  {registryInsights.topSection.count > 0 && (
+                    <span className="text-xs font-normal text-muted-foreground ml-1">
+                      ({registryInsights.topSection.count})
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="flex flex-col w-full border-border shadow-sm max-h-[calc(100vh-280px)]">
+        <CardHeader className="border-b border-gray-50 pb-4 shrink-0">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             <div>
               <CardTitle className="text-lg font-bold text-foreground">Student List</CardTitle>
@@ -1279,13 +1702,13 @@ export default function RegistryPage() {
           <CardContent className="p-0 flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 overflow-auto px-4 pb-4 sm:px-6 sm:pb-6">
             <Table className="w-full min-w-[640px]">
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10">
                 <TableRow className="bg-muted">
-                  <TableHead className="font-bold text-primary">Student Name</TableHead>
-                  <TableHead className="font-bold text-primary">Level / Year</TableHead>
-                  <TableHead className="font-bold text-primary">Section</TableHead>
-                  <TableHead className="font-bold text-primary">LRN / ID</TableHead>
-                  <TableHead className="text-right font-bold text-primary">Status</TableHead>
+                  <TableHead className="font-bold text-primary bg-muted">Student Name</TableHead>
+                  <TableHead className="font-bold text-primary bg-muted">Level / Year</TableHead>
+                  <TableHead className="font-bold text-primary bg-muted">Section</TableHead>
+                  <TableHead className="font-bold text-primary bg-muted">LRN / ID</TableHead>
+                  <TableHead className="text-right font-bold text-primary bg-muted">Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1342,7 +1765,272 @@ export default function RegistryPage() {
           </div>
         </CardContent>
       </Card>
+        </TabsContent>
+
+        <TabsContent value="parents" className="flex-1 flex flex-col min-h-0 mt-0">
+          <Card className="flex flex-col w-full border-border shadow-sm max-h-[calc(100vh-280px)]">
+            <CardHeader className="border-b border-gray-50 pb-4 shrink-0">
+              <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                <div>
+                  <CardTitle className="text-lg font-bold text-foreground">Parent / Guardian List</CardTitle>
+                  <CardDescription>
+                    {filteredGuardians.length} of {guardians.length} parents shown.
+                    {guardiansError && (
+                      <span className="text-red-600 ml-2">{guardiansError}</span>
+                    )}
+                  </CardDescription>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2 sm:items-center w-full sm:w-auto">
+                  <input
+                    type="text"
+                    value={guardianSearchTerm}
+                    onChange={(e) => setGuardianSearchTerm(e.target.value)}
+                    placeholder="Search name, email, or linked student..."
+                    className="w-full sm:w-72 px-3 py-2 text-sm border border-border rounded-full bg-card text-muted-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/20 focus:border-[#1B4D3E] placeholder:text-muted-foreground/70"
+                  />
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0 flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 overflow-auto px-4 pb-4 sm:px-6 sm:pb-6">
+                <Table className="w-full min-w-[640px]">
+                  <TableHeader className="sticky top-0 z-10">
+                    <TableRow className="bg-muted">
+                      <TableHead className="font-bold text-primary bg-muted">Parent Name</TableHead>
+                      <TableHead className="font-bold text-primary bg-muted">Email</TableHead>
+                      <TableHead className="font-bold text-primary bg-muted">Linked Students</TableHead>
+                      <TableHead className="text-right font-bold text-primary bg-muted">Status</TableHead>
+                      <TableHead className="text-right font-bold text-primary bg-muted w-20">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {isLoadingGuardians ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                          <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                          Loading parents...
+                        </TableCell>
+                      </TableRow>
+                    ) : filteredGuardians.length > 0 ? (
+                      filteredGuardians.map((guardian) => (
+                        <TableRow
+                          key={guardian.id}
+                          className="transition-all duration-150 hover:bg-card hover:shadow-sm"
+                        >
+                          <TableCell className="font-medium text-foreground">
+                            {guardian.fullName}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">{guardian.email}</TableCell>
+                          <TableCell className="text-muted-foreground">
+                            {guardian.linkedStudents.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {guardian.linkedStudents.map((student) => (
+                                  <Tooltip key={student.studentId}>
+                                    <TooltipTrigger asChild>
+                                      <span
+                                        className="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-xs border border-blue-200 dark:border-blue-800 cursor-help"
+                                      >
+                                        {student.studentName}
+                                        {student.isPrimary && (
+                                          <span className="ml-1 text-amber-500">★</span>
+                                        )}
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top" className="max-w-xs">
+                                      <div className="space-y-1">
+                                        <div className="font-medium">{student.grade} - {student.section}</div>
+                                        <div className="text-white/80">LRN: {student.lrn}</div>
+                                        {student.relationship && (
+                                          <div className="text-white/80">Relationship: {student.relationship}</div>
+                                        )}
+                                        {student.isPrimary && (
+                                          <div className="text-amber-300 text-[10px] font-medium">★ Primary Guardian</div>
+                                        )}
+                                      </div>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-muted-foreground/60 italic">No linked students</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span
+                              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${
+                                guardian.isActive
+                                  ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/40"
+                                  : "bg-muted text-muted-foreground border-border/60"
+                              }`}
+                            >
+                              {guardian.isActive ? "Active" : "Inactive"}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 w-8 p-0"
+                              onClick={() => {
+                                setEditGuardianError(null);
+                                setEditGuardian(guardian);
+                                setEditGuardianFullName(guardian.fullName);
+                                setEditGuardianEmail(guardian.email);
+                                setEditGuardianIsActive(guardian.isActive);
+                                setIsEditGuardianDialogOpen(true);
+                              }}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    ) : (
+                      <TableRow>
+                        <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                          {guardians.length === 0
+                            ? "No parents found. Parents are created when you import students with guardian information."
+                            : "No parents match your search."}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
       </div>
+
+      {/* Edit Guardian Dialog */}
+      {isEditGuardianDialogOpen && editGuardian && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 backdrop-blur-sm dialog-backdrop-animate"
+          onClick={() => setIsEditGuardianDialogOpen(false)}
+        >
+          <div
+            className="bg-card rounded-2xl shadow-xl w-full max-w-md border border-border/50 dialog-panel-animate"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between px-6 pt-5 pb-3 border-b border-border/50">
+              <div>
+                <h2 className="text-lg font-bold text-foreground">Edit Parent / Guardian</h2>
+                <p className="text-sm text-muted-foreground">
+                  Update the parent&apos;s account details.
+                </p>
+                {editGuardianError && (
+                  <p className="mt-1 text-xs text-red-600">{editGuardianError}</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditGuardianDialogOpen(false)}
+                className="text-muted-foreground/70 hover:text-muted-foreground"
+                aria-label="Close dialog"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={(e) => void handleEditGuardianSubmit(e)} className="px-6 pb-5 pt-4 space-y-4">
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-muted-foreground">Full Name *</label>
+                <input
+                  type="text"
+                  name="fullName"
+                  value={editGuardianFullName}
+                  onChange={(e) => setEditGuardianFullName(e.target.value)}
+                  placeholder="Enter full name"
+                  className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-card text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/20 focus:border-[#1B4D3E] placeholder:text-muted-foreground/70"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-muted-foreground">Email *</label>
+                <input
+                  type="email"
+                  name="email"
+                  value={editGuardianEmail}
+                  onChange={(e) => setEditGuardianEmail(e.target.value)}
+                  placeholder="Enter email address"
+                  className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-card text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/20 focus:border-[#1B4D3E] placeholder:text-muted-foreground/70"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-muted-foreground">Status</label>
+                <Select
+                  value={editGuardianIsActive ? "active" : "inactive"}
+                  onValueChange={(value) => setEditGuardianIsActive(value === "active")}
+                >
+                  <SelectTrigger className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-card text-foreground shadow-sm">
+                    <SelectValue placeholder="Select status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="inactive">Inactive</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {editGuardian.linkedStudents.length > 0 && (
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-medium text-muted-foreground">Linked Students</label>
+                  <div className="flex flex-wrap gap-1.5 p-2 border border-border rounded-lg bg-muted/30">
+                    {editGuardian.linkedStudents.map((student) => (
+                      <span
+                        key={student.studentId}
+                        className="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 text-xs border border-blue-200 dark:border-blue-800"
+                      >
+                        {student.studentName}
+                        {student.relationship && (
+                          <span className="ml-1 text-muted-foreground">({student.relationship})</span>
+                        )}
+                        {student.isPrimary && (
+                          <span className="ml-1 text-amber-500">★</span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Student links are managed through the student import process.
+                  </p>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setIsEditGuardianDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  className="bg-[#1B4D3E] text-white hover:bg-[#163e32]"
+                  disabled={isUpdatingGuardian}
+                >
+                  {isUpdatingGuardian ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                      Saving...
+                    </>
+                  ) : (
+                    "Save Changes"
+                  )}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {isLevelDialogOpen && (
         <div
@@ -2344,6 +3032,243 @@ export default function RegistryPage() {
                 </div>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Insight Detail Dialogs */}
+      {activeInsightDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setActiveInsightDialog(null)}
+          />
+          <div className="relative bg-card rounded-xl shadow-xl border border-border w-full max-w-lg mx-4 max-h-[80vh] flex flex-col">
+            {/* Dialog Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                {activeInsightDialog === "total" && (
+                  <>
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 dark:bg-blue-900/20">
+                      <Users className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold text-foreground">Total Students</h3>
+                      <p className="text-xs text-muted-foreground">Breakdown by grade level</p>
+                    </div>
+                  </>
+                )}
+                {activeInsightDialog === "active" && (
+                  <>
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-50 dark:bg-emerald-900/20">
+                      <UserCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold text-foreground">Student Status</h3>
+                      <p className="text-xs text-muted-foreground">Active, inactive & pending breakdown</p>
+                    </div>
+                  </>
+                )}
+                {activeInsightDialog === "grade" && (
+                  <>
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-purple-50 dark:bg-purple-900/20">
+                      <GraduationCap className="h-4 w-4 text-purple-600 dark:text-purple-400" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold text-foreground">Students by Grade</h3>
+                      <p className="text-xs text-muted-foreground">All grade levels ranked by enrollment</p>
+                    </div>
+                  </>
+                )}
+                {activeInsightDialog === "section" && (
+                  <>
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-50 dark:bg-amber-900/20">
+                      <TrendingUp className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold text-foreground">Students by Section</h3>
+                      <p className="text-xs text-muted-foreground">All sections ranked by enrollment</p>
+                    </div>
+                  </>
+                )}
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 p-0"
+                onClick={() => setActiveInsightDialog(null)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            {/* Dialog Content */}
+            <div className="flex-1 overflow-y-auto p-5">
+              {/* Total Students Dialog */}
+              {activeInsightDialog === "total" && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-muted/50 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-foreground">{registryInsights.totalStudents}</p>
+                      <p className="text-xs text-muted-foreground">Total</p>
+                    </div>
+                    <div className="bg-muted/50 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-foreground">{registryInsights.gradeBreakdown.length}</p>
+                      <p className="text-xs text-muted-foreground">Grades</p>
+                    </div>
+                    <div className="bg-muted/50 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-foreground">{registryInsights.sectionBreakdown.length}</p>
+                      <p className="text-xs text-muted-foreground">Sections</p>
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-medium text-foreground mb-3">Students per Grade</h4>
+                    <div className="space-y-2">
+                      {registryInsights.gradeBreakdown.map((item) => (
+                        <div key={item.grade} className="flex items-center gap-3">
+                          <span className="text-sm text-foreground w-24 truncate">{item.grade}</span>
+                          <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-blue-500 rounded-full"
+                              style={{
+                                width: `${registryInsights.totalStudents > 0 ? (item.total / registryInsights.totalStudents) * 100 : 0}%`,
+                              }}
+                            />
+                          </div>
+                          <span className="text-sm font-medium text-foreground w-12 text-right">{item.total}</span>
+                        </div>
+                      ))}
+                      {registryInsights.gradeBreakdown.length === 0 && (
+                        <p className="text-sm text-muted-foreground text-center py-4">No student data available</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Active Students Dialog */}
+              {activeInsightDialog === "active" && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{registryInsights.activeStudents}</p>
+                      <p className="text-xs text-emerald-600/70 dark:text-emerald-400/70">Active</p>
+                    </div>
+                    <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-red-600 dark:text-red-400">{registryInsights.inactiveStudents}</p>
+                      <p className="text-xs text-red-600/70 dark:text-red-400/70">Inactive</p>
+                    </div>
+                    <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-3 text-center">
+                      <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">{registryInsights.pendingStudents}</p>
+                      <p className="text-xs text-amber-600/70 dark:text-amber-400/70">Pending</p>
+                    </div>
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-medium text-foreground mb-3">Status by Grade</h4>
+                    <div className="space-y-3">
+                      {registryInsights.gradeBreakdown.map((item) => (
+                        <div key={item.grade} className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium text-foreground">{item.grade}</span>
+                            <span className="text-xs text-muted-foreground">{item.total} students</span>
+                          </div>
+                          <div className="flex gap-1 h-2">
+                            {item.active > 0 && (
+                              <div
+                                className="bg-emerald-500 rounded-full"
+                                style={{ width: `${(item.active / item.total) * 100}%` }}
+                                title={`Active: ${item.active}`}
+                              />
+                            )}
+                            {item.inactive > 0 && (
+                              <div
+                                className="bg-red-500 rounded-full"
+                                style={{ width: `${(item.inactive / item.total) * 100}%` }}
+                                title={`Inactive: ${item.inactive}`}
+                              />
+                            )}
+                            {item.pending > 0 && (
+                              <div
+                                className="bg-amber-500 rounded-full"
+                                style={{ width: `${(item.pending / item.total) * 100}%` }}
+                                title={`Pending: ${item.pending}`}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {registryInsights.gradeBreakdown.length === 0 && (
+                        <p className="text-sm text-muted-foreground text-center py-4">No student data available</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Grade Breakdown Dialog */}
+              {activeInsightDialog === "grade" && (
+                <div className="space-y-3">
+                  {registryInsights.gradeBreakdown.map((item, index) => (
+                    <div
+                      key={item.grade}
+                      className={`flex items-center gap-3 p-3 rounded-lg ${index === 0 ? "bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800" : "bg-muted/50"}`}
+                    >
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-card text-sm font-bold text-muted-foreground">
+                        {index + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">{item.grade}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {item.active} active, {item.inactive} inactive, {item.pending} pending
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-lg font-bold text-foreground">{item.total}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {registryInsights.totalStudents > 0
+                            ? Math.round((item.total / registryInsights.totalStudents) * 100)
+                            : 0}%
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  {registryInsights.gradeBreakdown.length === 0 && (
+                    <p className="text-sm text-muted-foreground text-center py-8">No grade data available</p>
+                  )}
+                </div>
+              )}
+
+              {/* Section Breakdown Dialog */}
+              {activeInsightDialog === "section" && (
+                <div className="space-y-3">
+                  {registryInsights.sectionBreakdown.map((item, index) => (
+                    <div
+                      key={`${item.grade}-${item.section}`}
+                      className={`flex items-center gap-3 p-3 rounded-lg ${index === 0 ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800" : "bg-muted/50"}`}
+                    >
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-card text-sm font-bold text-muted-foreground">
+                        {index + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">{item.section}</p>
+                        <p className="text-xs text-muted-foreground">{item.grade}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-lg font-bold text-foreground">{item.total}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {registryInsights.totalStudents > 0
+                            ? Math.round((item.total / registryInsights.totalStudents) * 100)
+                            : 0}%
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  {registryInsights.sectionBreakdown.length === 0 && (
+                    <p className="text-sm text-muted-foreground text-center py-8">No section data available</p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
