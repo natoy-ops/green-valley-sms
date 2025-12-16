@@ -9,6 +9,12 @@ interface EventPublicPageProps {
   params: { eventId: string };
 }
 
+const appUrl =
+  process.env.NEXT_PUBLIC_APP_URL ||
+  process.env.URL ||
+  process.env.DEPLOY_PRIME_URL ||
+  "http://localhost:3000";
+
 async function getPublicEvent(eventId: string) {
   const supabase = getAdminSupabaseClient();
   const eventRepository = new EventRepository(supabase);
@@ -36,16 +42,43 @@ export async function generateMetadata({
     };
   }
 
+  const baseUrl = new URL(appUrl);
+  const canonicalUrl = new URL(`/events/${params.eventId}`, baseUrl).toString();
+  const rawPosterUrl = event.posterImageUrl ?? null;
+  const posterUrl = rawPosterUrl
+    ? (rawPosterUrl.startsWith("http://") || rawPosterUrl.startsWith("https://")
+        ? rawPosterUrl
+        : new URL(rawPosterUrl.startsWith("/") ? rawPosterUrl : `/${rawPosterUrl}`, baseUrl).toString())
+    : null;
+  const description = event.description ?? undefined;
+
   return {
     title: `${event.title} | School Events`,
-    description: event.description ?? undefined,
+    description,
+    alternates: {
+      canonical: canonicalUrl,
+    },
     openGraph: {
       title: event.title,
-      description: event.description ?? undefined,
-      images: event.posterImageUrl
-        ? [{ url: event.posterImageUrl }]
+      description,
+      url: canonicalUrl,
+      images: posterUrl
+        ? [
+            {
+              url: posterUrl,
+              width: 1200,
+              height: 630,
+              alt: event.title,
+            },
+          ]
         : [],
       type: "website",
+    },
+    twitter: {
+      card: posterUrl ? "summary_large_image" : "summary",
+      title: event.title,
+      description,
+      images: posterUrl ? [posterUrl] : undefined,
     },
   };
 }
