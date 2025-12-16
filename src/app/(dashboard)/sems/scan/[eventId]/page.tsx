@@ -71,6 +71,13 @@ export default function EventScannerPage() {
   const [isCameraSupported, setIsCameraSupported] = useState<boolean | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isTorchSupported, setIsTorchSupported] = useState(false);
+  const [scannerModeLabel, setScannerModeLabel] = useState<string>("—");
+  const [scanFeedbackLabel, setScanFeedbackLabel] = useState<string | null>(null);
+  const [scanFeedbackVariant, setScanFeedbackVariant] = useState<
+    "success" | "warning" | "info" | "error" | null
+  >(null);
+  const [scanFeedbackPulseToken, setScanFeedbackPulseToken] = useState(0);
+  const [isScanFeedbackPulsing, setIsScanFeedbackPulsing] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -78,8 +85,14 @@ export default function EventScannerPage() {
   const isScanningRef = useRef(false);
   const lastScanValueRef = useRef<string | null>(null);
   const lastScanTimeRef = useRef<number>(0);
+  const lastDetectTimeRef = useRef<number>(0);
+  const detectorCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const nativeUseCanvasRef = useRef(true);
+  const nativeDetectErrorCountRef = useRef(0);
+  const hasFallenBackToZxingRef = useRef(false);
   const scanningModeRef = useRef<"native" | "zxing" | null>(null);
   const zxingReaderRef = useRef<BrowserQRCodeReader | null>(null);
+  const zxingControlsRef = useRef<{ stop: () => void } | null>(null);
 
   // Status styling
   const getStatusStyles = (status: ScannedStudent["status"]) => {
@@ -118,6 +131,28 @@ export default function EventScannerPage() {
         };
     }
   };
+
+  function resolveScanFeedback(scan: {
+    status: ScanStatus;
+    isRegisteredStudent: boolean;
+  }): { label: string; variant: "success" | "warning" | "info" | "error" } {
+    if (scan.status === "PRESENT") return { label: "Valid", variant: "success" };
+    if (scan.status === "LATE") return { label: "Late", variant: "warning" };
+    if (scan.status === "DUPLICATE") return { label: "Duplicate", variant: "info" };
+    if (!scan.isRegisteredStudent) return { label: "Invalid QR", variant: "error" };
+    return { label: "Denied", variant: "error" };
+  }
+
+  useEffect(() => {
+    if (scanFeedbackPulseToken === 0) return;
+    setIsScanFeedbackPulsing(true);
+    const t = window.setTimeout(() => {
+      setIsScanFeedbackPulsing(false);
+    }, 520);
+    return () => {
+      window.clearTimeout(t);
+    };
+  }, [scanFeedbackPulseToken]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -287,6 +322,14 @@ export default function EventScannerPage() {
       scannedAt: timeLabel,
     });
 
+    const feedback = resolveScanFeedback({
+      status: scanStatus,
+      isRegisteredStudent: !!studentRecord,
+    });
+    setScanFeedbackLabel(feedback.label);
+    setScanFeedbackVariant(feedback.variant);
+    setScanFeedbackPulseToken((prev) => prev + 1);
+
     setScanStats((prev) => {
       const next = { ...prev };
 
@@ -329,19 +372,34 @@ export default function EventScannerPage() {
     isScanningRef.current = false;
     lastScanValueRef.current = null;
     lastScanTimeRef.current = 0;
+    lastDetectTimeRef.current = 0;
+    nativeUseCanvasRef.current = true;
+    nativeDetectErrorCountRef.current = 0;
+    hasFallenBackToZxingRef.current = false;
+    setScannerModeLabel("—");
+    setScanFeedbackLabel(null);
+    setScanFeedbackVariant(null);
+    setFlashOn(false);
+    setIsTorchSupported(false);
 
-    if (scanningModeRef.current === "native") {
-      if (animationFrameRef.current !== null) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
 
-      if (streamRef.current) {
-        for (const track of streamRef.current.getTracks()) {
-          track.stop();
-        }
-        streamRef.current = null;
+    if (streamRef.current) {
+      for (const track of streamRef.current.getTracks()) {
+        track.stop();
       }
+      streamRef.current = null;
+    }
+
+    if (zxingControlsRef.current) {
+      try {
+        zxingControlsRef.current.stop();
+      } catch {
+      }
+      zxingControlsRef.current = null;
     }
 
     if (scanningModeRef.current === "zxing" && zxingReaderRef.current) {
@@ -362,18 +420,14 @@ export default function EventScannerPage() {
     if (!videoTrack) return;
 
     try {
-      // Use ImageCapture API to check torch capability
-      const capabilities = videoTrack.getCapabilities?.() as MediaTrackCapabilities & { torch?: boolean };
-      if (!capabilities?.torch) {
-        return; // Torch not supported
-      }
-
       await videoTrack.applyConstraints({
         advanced: [{ torch: enable } as MediaTrackConstraintSet],
       });
       setFlashOn(enable);
+      setIsTorchSupported(true);
     } catch {
       // Torch control failed silently
+      setIsTorchSupported(false);
     }
   }
 
@@ -396,21 +450,78 @@ export default function EventScannerPage() {
   async function startScanning() {
     if (isScanningRef.current) return;
     setCameraError(null);
+    hasFallenBackToZxingRef.current = false;
+
+    async function startZxingFromCurrentVideo() {
+      const video = videoRef.current;
+      if (!video) return;
+
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+
+      const reader = new BrowserQRCodeReader();
+      zxingReaderRef.current = reader;
+      isScanningRef.current = true;
+      scanningModeRef.current = "zxing";
+      setScannerModeLabel("ZXing");
+
+      await reader.decodeFromVideoElement(video, (result, err, controls) => {
+        zxingControlsRef.current = controls;
+
+        if (!isScanningRef.current) {
+          controls.stop();
+          return;
+        }
+
+        if (result) {
+          const value = result.getText();
+          const now = Date.now();
+          const lastValue = lastScanValueRef.current;
+          const lastTime = lastScanTimeRef.current;
+
+          if (value && (value !== lastValue || now - lastTime > 1000)) {
+            lastScanValueRef.current = value;
+            lastScanTimeRef.current = now;
+            void processScan(value);
+          }
+        }
+      });
+    }
 
     // Helper to get camera stream with fallback constraints for mobile compatibility
     async function getCameraStream(): Promise<MediaStream> {
       // Try back camera first with flexible constraint
       try {
         return await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
+          video: {
+            facingMode: { exact: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
           audio: false,
         });
       } catch {
-        // Fallback: try any available camera
-        return await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false,
-        });
+        try {
+          return await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+        } catch {
+          // Fallback: try any available camera
+          return await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+        }
       }
     }
 
@@ -419,10 +530,26 @@ export default function EventScannerPage() {
       : undefined) as
       | (new (options: { formats: string[] }) => {
           detect: (source: CanvasImageSource) => Promise<Array<{ rawValue: string }>>;
-        })
+        }) & {
+          getSupportedFormats?: () => Promise<string[]> | string[];
+        }
       | undefined;
 
-    if (BarcodeDetectorCtor && typeof navigator !== "undefined" && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
+    const nativeSupportedFormats = (() => {
+      const maybe = BarcodeDetectorCtor?.getSupportedFormats?.();
+      if (!maybe) return null;
+      if (Array.isArray(maybe)) return maybe;
+      return null;
+    })();
+
+    const canUseNativeDetector =
+      !!BarcodeDetectorCtor &&
+      (!nativeSupportedFormats || nativeSupportedFormats.includes("qr_code")) &&
+      typeof navigator !== "undefined" &&
+      !!navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === "function";
+
+    if (canUseNativeDetector) {
       try {
         const stream = await getCameraStream();
 
@@ -436,19 +563,62 @@ export default function EventScannerPage() {
 
         streamRef.current = stream;
         video.srcObject = stream;
+        video.setAttribute("playsinline", "true");
         await video.play().catch(() => undefined);
         checkTorchSupport(stream);
 
         const detector = new BarcodeDetectorCtor({ formats: ["qr_code"] });
         isScanningRef.current = true;
         scanningModeRef.current = "native";
+        setScannerModeLabel("Native");
+        nativeUseCanvasRef.current = true;
+        nativeDetectErrorCountRef.current = 0;
+
+        if (typeof document !== "undefined" && !detectorCanvasRef.current) {
+          detectorCanvasRef.current = document.createElement("canvas");
+        }
 
         const scanLoop = async () => {
           if (!isScanningRef.current) return;
 
           if (video.readyState >= 2) {
+            const nowPerf = typeof performance !== "undefined" ? performance.now() : Date.now();
+            if (nowPerf - lastDetectTimeRef.current < 100) {
+              animationFrameRef.current = requestAnimationFrame(scanLoop);
+              return;
+            }
+
+            lastDetectTimeRef.current = nowPerf;
+
             try {
-              const results = await detector.detect(video as unknown as CanvasImageSource);
+              let results: Array<{ rawValue: string }> = [];
+              if (nativeUseCanvasRef.current) {
+                const canvas = detectorCanvasRef.current;
+                const ctx = canvas?.getContext("2d", { willReadFrequently: true });
+
+                if (!canvas || !ctx) {
+                  animationFrameRef.current = requestAnimationFrame(scanLoop);
+                  return;
+                }
+
+                const w = video.videoWidth;
+                const h = video.videoHeight;
+                if (!w || !h) {
+                  animationFrameRef.current = requestAnimationFrame(scanLoop);
+                  return;
+                }
+
+                if (canvas.width !== w || canvas.height !== h) {
+                  canvas.width = w;
+                  canvas.height = h;
+                }
+
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                results = await detector.detect(canvas);
+              } else {
+                results = await detector.detect(video as unknown as CanvasImageSource);
+              }
+
               if (results && results.length > 0) {
                 const value = results[0]?.rawValue ?? "";
                 const now = Date.now();
@@ -462,6 +632,18 @@ export default function EventScannerPage() {
                 }
               }
             } catch {
+              nativeDetectErrorCountRef.current += 1;
+              if (nativeUseCanvasRef.current) {
+                nativeUseCanvasRef.current = false;
+              } else if (nativeDetectErrorCountRef.current >= 10 && !hasFallenBackToZxingRef.current) {
+                hasFallenBackToZxingRef.current = true;
+                try {
+                  await startZxingFromCurrentVideo();
+                } catch {
+                  await stopScanning();
+                }
+                return;
+              }
             }
           }
 
@@ -487,6 +669,7 @@ export default function EventScannerPage() {
       const stream = await getCameraStream();
       streamRef.current = stream;
       video.srcObject = stream;
+      video.setAttribute("playsinline", "true");
       await video.play().catch(() => undefined);
       checkTorchSupport(stream);
 
@@ -494,9 +677,11 @@ export default function EventScannerPage() {
       zxingReaderRef.current = reader;
       isScanningRef.current = true;
       scanningModeRef.current = "zxing";
+      setScannerModeLabel("ZXing");
 
       // Use decodeFromVideoElement instead of decodeFromVideoDevice for better mobile support
       await reader.decodeFromVideoElement(video, (result, err, controls) => {
+        zxingControlsRef.current = controls;
         if (!isScanningRef.current) {
           controls.stop();
           return;
@@ -535,6 +720,9 @@ export default function EventScannerPage() {
         muted
         playsInline
       />
+      <div className="absolute left-4 top-16 z-20 rounded-full bg-black/45 px-2.5 py-1 text-[10px] font-medium text-white/90 backdrop-blur">
+        Mode: {scannerModeLabel}
+      </div>
       <div className="absolute inset-0 bg-gradient-to-b from-black/60 via-black/10 to-black/80" />
       <div className="relative z-10 flex h-full flex-col">
         {/* Header */}
@@ -555,25 +743,24 @@ export default function EventScannerPage() {
             <p className="text-[11px] text-white/70">{headerVenue}</p>
           </div>
 
-          {isTorchSupported ? (
-            <button
-              type="button"
-              onClick={() => {
-                void toggleTorch(!flashOn);
-              }}
-              className={cn(
-                "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium shadow-sm transition-colors",
-                flashOn
-                  ? "bg-amber-400 text-amber-900"
-                  : "bg-[#1B4D3E]/90 text-emerald-50 hover:bg-[#16352A]"
-              )}
-            >
-              {flashOn ? <Zap className="w-3.5 h-3.5" /> : <ZapOff className="w-3.5 h-3.5" />}
-              <span className="hidden sm:inline">{flashOn ? "Flash on" : "Flash off"}</span>
-            </button>
-          ) : (
-            <div className="w-10 h-10" /> // Placeholder to maintain layout
-          )}
+          <button
+            type="button"
+            disabled={!isTorchSupported && !flashOn}
+            onClick={() => {
+              void toggleTorch(!flashOn);
+            }}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium shadow-sm transition-colors",
+              flashOn
+                ? "bg-amber-400 text-amber-900"
+                : isTorchSupported
+                  ? "bg-[#1B4D3E]/90 text-emerald-50 hover:bg-[#16352A]"
+                  : "bg-white/10 text-white/60"
+            )}
+          >
+            {flashOn ? <Zap className="w-3.5 h-3.5" /> : <ZapOff className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{flashOn ? "Flash on" : "Flash off"}</span>
+          </button>
         </div>
 
         {/* Camera Viewfinder Area */}
@@ -613,163 +800,74 @@ export default function EventScannerPage() {
 
         {/* Bottom Student Info Card - floating panel */}
         <div className="pointer-events-none px-4 pb-6">
-          <div className="bg-white rounded-3xl shadow-2xl border border-emerald-100 max-w-md mx-auto w-full pointer-events-auto">
-        {!isLoadingResources && !eventRecord ? (
-          <div className="p-6 text-center">
-            {/* Drag handle */}
-            <div className="flex justify-center mb-4">
-              <div className="w-10 h-1 bg-gray-300 rounded-full" />
-            </div>
+          <div
+            className={cn(
+              "bg-white/95 backdrop-blur rounded-[32px] shadow-2xl border border-white/70 max-w-md mx-auto w-full pointer-events-auto",
+              isScanFeedbackPulsing && "scan-feedback-pop",
+              isScanFeedbackPulsing && scanFeedbackVariant === "success" && "scan-feedback-glow-success",
+              isScanFeedbackPulsing && scanFeedbackVariant === "warning" && "scan-feedback-glow-warning",
+              isScanFeedbackPulsing && scanFeedbackVariant === "info" && "scan-feedback-glow-info",
+              isScanFeedbackPulsing && scanFeedbackVariant === "error" && "scan-feedback-glow-error"
+            )}
+          >
+            {!isLoadingResources && !eventRecord ? (
+              <div className="px-5 pt-4 pb-5">
+                {/* Drag handle */}
+                <div className="flex justify-center mb-3">
+                  <div className="w-10 h-1 bg-gray-300 rounded-full" />
+                </div>
 
-            <div className="py-6">
-              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-amber-50 flex items-center justify-center border border-amber-200">
-                <AlertCircle className="w-8 h-8 text-amber-500" />
-              </div>
-              <p className="text-sm text-gray-800 font-semibold">
-                Scanner resources missing
-              </p>
-              <p className="text-xs text-gray-500 mt-1">
-                Download event data on the previous screen to enable fast offline scanning.
-              </p>
-              <p className="text-xs text-gray-400 mt-2">
-                Expected attendees data will appear here once resources are cached.
-              </p>
-            </div>
-          </div>
-        ) : lastScan ? (
-          <div className="p-4 sm:p-5">
-            {/* Drag handle */}
-            <div className="flex justify-center mb-3">
-              <div className="w-10 h-1 bg-gray-300 rounded-full" />
-            </div>
-
-            {(() => {
-              const styles = getStatusStyles(lastScan.status);
-              const StatusIcon = styles.icon;
-
-              return (
-                <div
-                  className={cn(
-                    "rounded-2xl border p-4 transition-all",
-                    styles.bg,
-                    styles.border
-                  )}
-                >
-                  <div className="flex items-start gap-3">
-                    {/* Student Avatar */}
-                    <Avatar className="w-14 h-14 sm:w-16 sm:h-16 border-2 border-white shadow-md">
-                      <AvatarImage src={lastScan.avatarUrl ?? undefined} />
-                      <AvatarFallback className="bg-[#1B4D3E] text-white text-lg font-semibold">
-                        {lastScan.name.charAt(0).toUpperCase()}
-                      </AvatarFallback>
-                    </Avatar>
-
-                    {/* Student Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <h2 className="text-base sm:text-lg font-bold text-gray-900 truncate">
-                            {lastScan.name}
-                          </h2>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            LRN: {lastScan.lrn}
-                          </p>
-                        </div>
-                        <Badge className={cn("shrink-0 text-[10px] sm:text-xs", styles.badgeBg)}>
-                          <StatusIcon className={cn("w-3 h-3 mr-1", styles.iconColor)} />
-                          {lastScan.status === "success" && "Recorded"}
-                          {lastScan.status === "late" && "Late"}
-                          {lastScan.status === "already_scanned" && "Duplicate"}
-                          {lastScan.status === "not_allowed" && "Denied"}
-                        </Badge>
-                      </div>
-
-                      {/* Grade & Section */}
-                      <div className="flex flex-wrap items-center gap-2 mt-2">
-                        <span className="inline-flex items-center gap-1 text-xs text-gray-600">
-                          <GraduationCap className="w-3.5 h-3.5 text-gray-400" />
-                          {lastScan.grade}
-                        </span>
-                        <span className="inline-flex items-center gap-1 text-xs text-gray-600">
-                          <User className="w-3.5 h-3.5 text-gray-400" />
-                          {lastScan.section}
-                        </span>
-                        <span className="inline-flex items-center gap-1 text-xs text-gray-600">
-                          <Clock className="w-3.5 h-3.5 text-gray-400" />
-                          {lastScan.scannedAt}
-                        </span>
-                      </div>
-
-                      {/* Status Message */}
-                      <p className={cn("text-xs mt-2 font-medium", styles.iconColor)}>
-                        {lastScan.message}
-                      </p>
-                    </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 truncate">
+                      Scanner resources missing
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5 truncate">
+                      Download event data to enable scanning.
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className="text-[11px] text-gray-500">Scanned</p>
+                    <p className="text-xl font-bold text-gray-900 tabular-nums">{scanStats.totalScanned}</p>
                   </div>
                 </div>
-              );
-            })()}
+              </div>
+            ) : (
+              <div className="px-5 pt-4 pb-5">
+                {/* Drag handle */}
+                <div className="flex justify-center mb-3">
+                  <div className="w-10 h-1 bg-gray-300 rounded-full" />
+                </div>
 
-            <div className="grid grid-cols-3 gap-2 mt-4">
-              <div className="bg-gray-50 rounded-xl p-3 text-center">
-                <p className="text-lg sm:text-xl font-bold text-gray-900">
-                  {scanStats.totalScanned}
-                </p>
-                <p className="text-[10px] sm:text-xs text-gray-500">Scanned</p>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="text-[11px] text-gray-500">Last scanned</p>
+                      {scanFeedbackLabel && (
+                        <span
+                          className={cn(
+                            "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium",
+                            scanFeedbackVariant === "success" && "bg-emerald-100 text-emerald-800",
+                            scanFeedbackVariant === "warning" && "bg-amber-100 text-amber-800",
+                            scanFeedbackVariant === "info" && "bg-sky-100 text-sky-800",
+                            scanFeedbackVariant === "error" && "bg-rose-100 text-rose-800"
+                          )}
+                        >
+                          {scanFeedbackLabel}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-base sm:text-lg font-semibold text-gray-900 truncate">
+                      {lastScan?.name ?? "Waiting for scan..."}
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className="text-[11px] text-gray-500">Scanned</p>
+                    <p className="text-2xl font-bold text-gray-900 tabular-nums">{scanStats.totalScanned}</p>
+                  </div>
+                </div>
               </div>
-              <div className="bg-gray-50 rounded-xl p-3 text-center">
-                <p className="text-lg sm:text-xl font-bold text-amber-600">
-                  {scanStats.totalLate}
-                </p>
-                <p className="text-[10px] sm:text-xs text-gray-500">Late</p>
-              </div>
-              <div className="bg-gray-50 rounded-xl p-3 text-center">
-                <p className="text-lg sm:text-xl font-bold text-gray-900">{remainingAllowed}</p>
-                <p className="text-[10px] sm:text-xs text-gray-500">Remaining</p>
-              </div>
-            </div>
-            {/* Manual QR hash input removed: scanning is camera-only now. */}
-          </div>
-        ) : (
-          <div className="p-6 text-center">
-            {/* Drag handle */}
-            <div className="flex justify-center mb-4">
-              <div className="w-10 h-1 bg-gray-300 rounded-full" />
-            </div>
-
-            <div className="py-8">
-              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gray-100 flex items-center justify-center">
-                <User className="w-8 h-8 text-gray-400" />
-              </div>
-              <p className="text-sm text-gray-500 font-medium">
-                Waiting for scan...
-              </p>
-              <p className="text-xs text-gray-400 mt-1">
-                Student info will appear here after scanning
-              </p>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 mt-4">
-              <div className="bg-gray-50 rounded-xl p-3 text-center">
-                <p className="text-lg sm:text-xl font-bold text-gray-900">
-                  {scanStats.totalScanned}
-                </p>
-                <p className="text-[10px] sm:text-xs text-gray-500">Scanned</p>
-              </div>
-              <div className="bg-gray-50 rounded-xl p-3 text-center">
-                <p className="text-lg sm:text-xl font-bold text-amber-600">
-                  {scanStats.totalLate}
-                </p>
-                <p className="text-[10px] sm:text-xs text-gray-500">Late</p>
-              </div>
-              <div className="bg-gray-50 rounded-xl p-3 text-center">
-                <p className="text-lg sm:text-xl font-bold text-gray-900">{remainingAllowed}</p>
-                <p className="text-[10px] sm:text-xs text-gray-500">Remaining</p>
-              </div>
-            </div>
-            {/* Manual QR hash input removed: scanning is camera-only now. */}
-          </div>
-        )}
+            )}
           </div>
         </div>
       </div>
@@ -777,6 +875,65 @@ export default function EventScannerPage() {
         .scan-line {
           top: 14%;
           animation: scan-line 1.6s ease-in-out infinite alternate;
+        }
+
+        .scan-feedback-pop {
+          animation: scan-feedback-pop 180ms ease-out;
+        }
+
+        @keyframes scan-feedback-pop {
+          0% {
+            transform: scale(0.985);
+          }
+          100% {
+            transform: scale(1);
+          }
+        }
+
+        .scan-feedback-glow-success {
+          animation: scan-feedback-glow-success 520ms ease-out;
+        }
+        .scan-feedback-glow-warning {
+          animation: scan-feedback-glow-warning 520ms ease-out;
+        }
+        .scan-feedback-glow-info {
+          animation: scan-feedback-glow-info 520ms ease-out;
+        }
+        .scan-feedback-glow-error {
+          animation: scan-feedback-glow-error 520ms ease-out;
+        }
+
+        @keyframes scan-feedback-glow-success {
+          0% {
+            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
+          }
+          100% {
+            box-shadow: 0 0 0 16px rgba(16, 185, 129, 0);
+          }
+        }
+        @keyframes scan-feedback-glow-warning {
+          0% {
+            box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55);
+          }
+          100% {
+            box-shadow: 0 0 0 16px rgba(245, 158, 11, 0);
+          }
+        }
+        @keyframes scan-feedback-glow-info {
+          0% {
+            box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.55);
+          }
+          100% {
+            box-shadow: 0 0 0 16px rgba(14, 165, 233, 0);
+          }
+        }
+        @keyframes scan-feedback-glow-error {
+          0% {
+            box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.55);
+          }
+          100% {
+            box-shadow: 0 0 0 16px rgba(244, 63, 94, 0);
+          }
         }
 
         @keyframes scan-line {
