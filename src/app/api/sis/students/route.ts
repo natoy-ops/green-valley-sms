@@ -617,3 +617,66 @@ export async function PATCH(request: NextRequest) {
 
   return formatSuccess<{ student: StudentDto }>({ student });
 }
+
+export async function DELETE(request: NextRequest) {
+  const authResult = await requireRoles(request, Array.from(ADMIN_TEACHER_ROLES));
+
+  if ("error" in authResult) {
+    return authResult.error;
+  }
+
+  const supabase = getAdminSupabaseClient();
+
+  let body: { studentIds?: unknown } | null = null;
+
+  try {
+    body = await request.json();
+  } catch {
+    return formatError(400, "INVALID_JSON", "Request body must be valid JSON.");
+  }
+
+  if (!body || !Array.isArray(body.studentIds) || body.studentIds.length === 0) {
+    return formatError(400, "VALIDATION_ERROR", "studentIds must be a non-empty array.", [
+      { field: "studentIds", message: "Must provide at least one student ID" },
+    ]);
+  }
+
+  const studentIds = body.studentIds as string[];
+
+  // Validate all IDs are valid UUIDs
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const invalidIds = studentIds.filter(id => typeof id !== "string" || !uuidRegex.test(id));
+
+  if (invalidIds.length > 0) {
+    return formatError(400, "VALIDATION_ERROR", "All student IDs must be valid UUIDs.", {
+      invalidIds,
+    });
+  }
+
+  // Perform soft delete by setting is_active to false
+  const { data, error } = await supabase
+    .from("students")
+    .update({ is_active: false })
+    .in("id", studentIds)
+    .select("id");
+
+  if (error) {
+    return formatError(
+      500,
+      "DELETE_FAILED",
+      "Failed to delete students.",
+      error.message
+    );
+  }
+
+  const deletedCount = data?.length ?? 0;
+
+  if (deletedCount === 0) {
+    return formatError(404, "STUDENTS_NOT_FOUND", "No students found with the provided IDs.");
+  }
+
+  return formatSuccess({
+    deletedCount,
+    message: `Successfully marked ${deletedCount} student${deletedCount === 1 ? "" : "s"} as inactive.`,
+  });
+}

@@ -42,7 +42,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (typeof window === "undefined") return;
 
     const path = currentPathname ?? window.location.pathname;
-    if (path === "/login") return;
+    const isPublicPath = path === "/login" || path === "/events" || path.startsWith("/events/");
+    if (isPublicPath) return;
     if (isAuthenticated) return;
 
     console.log("[AuthContext] redirecting to /login because user is not authenticated");

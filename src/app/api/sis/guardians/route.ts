@@ -322,3 +322,65 @@ export async function PATCH(request: NextRequest) {
 
   return formatSuccess({ guardian });
 }
+
+export async function DELETE(request: NextRequest) {
+  const authResult = await requireRoles(request, [...ADMIN_ROLES]);
+  if (authResult instanceof NextResponse) {
+    return authResult;
+  }
+
+  const supabase = getAdminSupabaseClient();
+
+  let body: { guardianIds?: unknown } | null = null;
+
+  try {
+    body = await request.json();
+  } catch {
+    return formatError(400, "INVALID_JSON", "Request body must be valid JSON.");
+  }
+
+  if (!body || !Array.isArray(body.guardianIds) || body.guardianIds.length === 0) {
+    return formatError(400, "VALIDATION_ERROR", "guardianIds must be a non-empty array.", [
+      { field: "guardianIds", message: "Must provide at least one guardian ID" },
+    ]);
+  }
+
+  const guardianIds = body.guardianIds as string[];
+
+  // Validate all IDs are valid UUIDs
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const invalidIds = guardianIds.filter(id => typeof id !== "string" || !uuidRegex.test(id));
+
+  if (invalidIds.length > 0) {
+    return formatError(400, "VALIDATION_ERROR", "All guardian IDs must be valid UUIDs.", {
+      invalidIds,
+    });
+  }
+
+  // Perform soft delete by setting is_active to false
+  const { data, error } = await supabase
+    .from("app_users")
+    .update({ is_active: false })
+    .in("id", guardianIds)
+    .select("id");
+
+  if (error) {
+    return formatError(
+      500,
+      "DELETE_FAILED",
+      "Failed to delete guardians.",
+      error.message
+    );
+  }
+
+  const deletedCount = data?.length ?? 0;
+
+  if (deletedCount === 0) {
+    return formatError(404, "GUARDIANS_NOT_FOUND", "No guardians found with the provided IDs.");
+  }
+
+  return formatSuccess({
+    deletedCount,
+    message: `Successfully marked ${deletedCount} guardian${deletedCount === 1 ? "" : "s"} as inactive.`,
+  });
+}

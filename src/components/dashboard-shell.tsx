@@ -26,6 +26,7 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import appSettings from "@/appsettings.json";
 import PageTransition from "@/components/page-transition";
+import SponsorModal from "@/components/sponsor-modal";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -117,6 +118,7 @@ export default function DashboardShell({ children, mobileTitle, mobileDescriptio
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isSponsorModalOpen, setIsSponsorModalOpen] = useState(false);
   const canManageUsers = hasRole(["SUPER_ADMIN", "ADMIN"]);
   const isAdministrativeUser = user ? isAdministrativeRole(user.roles) : false;
   const shouldHideModules = !isAdministrativeUser && hasRole(["SCANNER", "STUDENT", "PARENT"]);
@@ -527,7 +529,14 @@ export default function DashboardShell({ children, mobileTitle, mobileDescriptio
                 @ 2025 {appSettings.appName} v{appSettings.version}
               </p>
               <p className="mt-0.5">
-                Initiated by <span className="font-semibold text-primary">SSC</span>
+                Initiated by{" "}
+                <button
+                  type="button"
+                  onClick={() => setIsSponsorModalOpen(true)}
+                  className="font-semibold text-primary hover:text-primary/80 transition-colors duration-200 underline decoration-dotted underline-offset-2 hover:underline-offset-4 cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/20 rounded px-1"
+                >
+                  SSC
+                </button>
               </p>
             </div>
           </div>
@@ -571,6 +580,8 @@ export default function DashboardShell({ children, mobileTitle, mobileDescriptio
           onClick={() => setIsSidebarOpen(false)}
         />
       )}
+
+      <SponsorModal isOpen={isSponsorModalOpen} onClose={() => setIsSponsorModalOpen(false)} />
     </div>
   );
 }
