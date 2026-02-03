@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
-import { Users, UsersRound, X, FileSpreadsheet, FileText, Download, ChevronDown, Loader2, Settings, Layers, LayoutGrid, GraduationCap, UserCheck, TrendingUp, Pencil } from "lucide-react";
+import { Users, UsersRound, X, FileSpreadsheet, FileText, Download, ChevronDown, Loader2, Settings, Layers, LayoutGrid, GraduationCap, UserCheck, TrendingUp, Pencil, Trash2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Checkbox } from "@/components/ui/checkbox";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 
 type StudentStatus = "Active" | "Inactive" | "Pending";
 
@@ -80,6 +82,7 @@ export default function RegistryPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [levelFilter, setLevelFilter] = useState<string>("all");
   const [sectionFilter, setSectionFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("active");
   const [levels, setLevels] = useState<LevelOption[]>([]);
   const [sections, setSections] = useState<SectionOption[]>([]);
   const levelOptions = levels.map((level) => level.name);
@@ -146,6 +149,19 @@ export default function RegistryPage() {
   const [editGuardianError, setEditGuardianError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>("students");
 
+  // Delete students state
+  const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(new Set());
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isDeletingStudents, setIsDeletingStudents] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // Delete guardians state
+  const [selectedGuardianIds, setSelectedGuardianIds] = useState<Set<string>>(new Set());
+  const [isDeleteGuardianDialogOpen, setIsDeleteGuardianDialogOpen] = useState(false);
+  const [isDeletingGuardians, setIsDeletingGuardians] = useState(false);
+  const [deleteGuardianError, setDeleteGuardianError] = useState<string | null>(null);
+  const [guardianStatusFilter, setGuardianStatusFilter] = useState<string>("active");
+
   // Insight detail dialogs
   type InsightDialogType = "total" | "active" | "grade" | "section" | null;
   const [activeInsightDialog, setActiveInsightDialog] = useState<InsightDialogType>(null);
@@ -195,6 +211,134 @@ export default function RegistryPage() {
     setGuardianCredentialsForDownload([]);
   }
 
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedStudentIds(new Set(filteredStudents.map(s => s.id)));
+    } else {
+      setSelectedStudentIds(new Set());
+    }
+  };
+
+  const handleSelectStudent = (studentId: string, checked: boolean) => {
+    const newSelection = new Set(selectedStudentIds);
+    if (checked) {
+      newSelection.add(studentId);
+    } else {
+      newSelection.delete(studentId);
+    }
+    setSelectedStudentIds(newSelection);
+  };
+
+  async function handleBulkDelete() {
+    setIsDeletingStudents(true);
+    setDeleteError(null);
+
+    try {
+      const response = await fetch("/api/sis/students", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ studentIds: Array.from(selectedStudentIds) }),
+      });
+
+      if (shouldRedirectToLogin(response)) return;
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        setDeleteError(result.error?.message || "Failed to delete students");
+        return;
+      }
+
+      // Refresh student list
+      setIsLoadingStudents(true);
+      const refreshResponse = await fetch("/api/sis/students", {
+        method: "GET",
+      });
+
+      if (shouldRedirectToLogin(refreshResponse)) {
+        return;
+      }
+
+      const refreshBody = await refreshResponse.json();
+      if (refreshResponse.ok && refreshBody.success && refreshBody.data) {
+        setStudents(refreshBody.data.students);
+      }
+
+      // Clear selection and close dialog
+      setSelectedStudentIds(new Set());
+      setIsDeleteDialogOpen(false);
+    } catch (error) {
+      setDeleteError("Network error occurred");
+    } finally {
+      setIsDeletingStudents(false);
+      setIsLoadingStudents(false);
+    }
+  }
+
+  const handleSelectAllGuardians = (checked: boolean) => {
+    if (checked) {
+      setSelectedGuardianIds(new Set(filteredGuardians.map(g => g.id)));
+    } else {
+      setSelectedGuardianIds(new Set());
+    }
+  };
+
+  const handleSelectGuardian = (guardianId: string, checked: boolean) => {
+    const newSelection = new Set(selectedGuardianIds);
+    if (checked) {
+      newSelection.add(guardianId);
+    } else {
+      newSelection.delete(guardianId);
+    }
+    setSelectedGuardianIds(newSelection);
+  };
+
+  async function handleBulkDeleteGuardians() {
+    setIsDeletingGuardians(true);
+    setDeleteGuardianError(null);
+
+    try {
+      const response = await fetch("/api/sis/guardians", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ guardianIds: Array.from(selectedGuardianIds) }),
+      });
+
+      if (shouldRedirectToLogin(response)) return;
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        setDeleteGuardianError(result.error?.message || "Failed to delete guardians");
+        return;
+      }
+
+      // Refresh guardian list
+      setIsLoadingGuardians(true);
+      const refreshResponse = await fetch("/api/sis/guardians", {
+        method: "GET",
+      });
+
+      if (shouldRedirectToLogin(refreshResponse)) {
+        return;
+      }
+
+      const refreshBody = await refreshResponse.json();
+      if (refreshResponse.ok && refreshBody.success && refreshBody.data) {
+        setGuardians(refreshBody.data.guardians);
+      }
+
+      // Clear selection and close dialog
+      setSelectedGuardianIds(new Set());
+      setIsDeleteGuardianDialogOpen(false);
+    } catch (error) {
+      setDeleteGuardianError("Network error occurred");
+    } finally {
+      setIsDeletingGuardians(false);
+      setIsLoadingGuardians(false);
+    }
+  }
+
   async function handleExportQrCodes(format: "excel" | "word") {
     if (isExporting) return;
 
@@ -234,8 +378,8 @@ export default function RegistryPage() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = format === "excel" 
-        ? `student_qr_codes_${Date.now()}.xlsx` 
+      a.download = format === "excel"
+        ? `student_qr_codes_${Date.now()}.xlsx`
         : `student_qr_cards_${Date.now()}.docx`;
       document.body.appendChild(a);
       a.click();
@@ -529,6 +673,16 @@ export default function RegistryPage() {
     };
   }, [activeTab, guardians.length]);
 
+  // Clear selection when filters change
+  useEffect(() => {
+    setSelectedStudentIds(new Set());
+  }, [levelFilter, sectionFilter, statusFilter, searchTerm]);
+
+  // Clear guardian selection when filters change
+  useEffect(() => {
+    setSelectedGuardianIds(new Set());
+  }, [guardianStatusFilter, guardianSearchTerm]);
+
   async function handleEditGuardianSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -603,6 +757,10 @@ export default function RegistryPage() {
 
   const filteredGuardians = guardians
     .filter((guardian) => {
+      // Status filter
+      if (guardianStatusFilter === "active" && !guardian.isActive) return false;
+      if (guardianStatusFilter === "inactive" && guardian.isActive) return false;
+
       if (guardianSearchTerm.trim()) {
         const q = guardianSearchTerm.toLowerCase();
         const studentNames = guardian.linkedStudents.map((s) => s.studentName.toLowerCase()).join(" ");
@@ -1162,6 +1320,11 @@ export default function RegistryPage() {
       if (levelFilter !== "all" && student.grade !== levelFilter) return false;
       if (sectionFilter !== "all" && student.section !== sectionFilter) return false;
 
+      // Status filter
+      if (statusFilter === "active" && student.status !== "Active") return false;
+      if (statusFilter === "inactive" && student.status !== "Inactive") return false;
+      if (statusFilter === "pending" && student.status !== "Pending") return false;
+
       if (searchTerm.trim()) {
         const q = searchTerm.toLowerCase();
         return (
@@ -1456,6 +1619,21 @@ export default function RegistryPage() {
             >
               + Add Student
             </Button>
+            {selectedStudentIds.size > 0 && (
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                className="text-sm"
+                onClick={() => {
+                  setDeleteError(null);
+                  setIsDeleteDialogOpen(true);
+                }}
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                Delete Selected ({selectedStudentIds.size})
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -1688,6 +1866,17 @@ export default function RegistryPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                  <SelectTrigger className="w-full sm:min-w-[140px] pl-3 pr-3 py-2 text-sm border border-border rounded-full bg-card text-muted-foreground shadow-sm">
+                    <SelectValue placeholder="All statuses" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All statuses</SelectItem>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="inactive">Inactive</SelectItem>
+                    <SelectItem value="pending">Pending</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <input
                 type="text"
@@ -1704,6 +1893,13 @@ export default function RegistryPage() {
             <Table className="w-full min-w-[640px]">
               <TableHeader className="sticky top-0 z-10">
                 <TableRow className="bg-muted">
+                  <TableHead className="w-12 bg-muted">
+                    <Checkbox
+                      checked={filteredStudents.length > 0 && selectedStudentIds.size === filteredStudents.length}
+                      onCheckedChange={handleSelectAll}
+                      aria-label="Select all students"
+                    />
+                  </TableHead>
                   <TableHead className="font-bold text-primary bg-muted">Student Name</TableHead>
                   <TableHead className="font-bold text-primary bg-muted">Level / Year</TableHead>
                   <TableHead className="font-bold text-primary bg-muted">Section</TableHead>
@@ -1714,48 +1910,61 @@ export default function RegistryPage() {
               <TableBody>
                 {isLoadingStudents ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={6} className="py-10 text-center text-sm text-muted-foreground">
                       Loading students...
                     </TableCell>
                   </TableRow>
                 ) : filteredStudents.length > 0 ? (
-                  filteredStudents.map((student) => (
-                    <TableRow
-                      key={student.id}
-                      className="cursor-pointer transition-all duration-150 hover:bg-card hover:shadow-sm hover:-translate-y-0.5 hover:border-border/50"
-                      onClick={() => {
-                        setEditStudentError(null);
-                        setEditStudent(student);
-                        setEditStudentLevelName(student.grade);
-                        setEditStudentSectionName(student.section || "");
-                        setEditStudentStatus(student.status);
-                        setIsEditStudentDialogOpen(true);
-                      }}
-                    >
-                      <TableCell className="font-medium text-foreground">
-                        {student.name}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">{student.grade}</TableCell>
-                      <TableCell className="text-muted-foreground">{student.section}</TableCell>
-                      <TableCell className="text-muted-foreground">{student.lrn}</TableCell>
-                      <TableCell className="text-right">
-                        <span
-                          className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${
-                            student.status === "Active"
-                              ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/40"
-                              : student.status === "Inactive"
-                              ? "bg-muted text-muted-foreground border-border/60"
-                              : "bg-amber-500/10 text-amber-300 border-amber-500/40"
-                          }`}
-                        >
-                          {student.status}
-                        </span>
-                      </TableCell>
-                    </TableRow>
-                  ))
+                  filteredStudents.map((student) => {
+                    const isSelected = selectedStudentIds.has(student.id);
+                    const handleRowClick = () => {
+                      setEditStudentError(null);
+                      setEditStudent(student);
+                      setEditStudentLevelName(student.grade);
+                      setEditStudentSectionName(student.section || "");
+                      setEditStudentStatus(student.status);
+                      setIsEditStudentDialogOpen(true);
+                    };
+
+                    return (
+                      <TableRow
+                        key={student.id}
+                        className={`transition-all duration-150 hover:bg-card hover:shadow-sm hover:-translate-y-0.5 hover:border-border/50 ${
+                          isSelected ? "bg-primary/5 border-primary/20" : ""
+                        }`}
+                      >
+                        <TableCell className="w-12" onClick={(e) => e.stopPropagation()}>
+                          <Checkbox
+                            checked={isSelected}
+                            onCheckedChange={(checked) => handleSelectStudent(student.id, checked as boolean)}
+                            aria-label={`Select ${student.name}`}
+                          />
+                        </TableCell>
+                        <TableCell className="font-medium text-foreground cursor-pointer" onClick={handleRowClick}>
+                          {student.name}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground cursor-pointer" onClick={handleRowClick}>{student.grade}</TableCell>
+                        <TableCell className="text-muted-foreground cursor-pointer" onClick={handleRowClick}>{student.section}</TableCell>
+                        <TableCell className="text-muted-foreground cursor-pointer" onClick={handleRowClick}>{student.lrn}</TableCell>
+                        <TableCell className="text-right cursor-pointer" onClick={handleRowClick}>
+                          <span
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${
+                              student.status === "Active"
+                                ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/40"
+                                : student.status === "Inactive"
+                                ? "bg-muted text-muted-foreground border-border/60"
+                                : "bg-amber-500/10 text-amber-300 border-amber-500/40"
+                            }`}
+                          >
+                            {student.status}
+                          </span>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
                 ) : (
                   <TableRow>
-                    <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={6} className="py-10 text-center text-sm text-muted-foreground">
                       No students match your filters yet.
                     </TableCell>
                   </TableRow>
@@ -1765,6 +1974,55 @@ export default function RegistryPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Students</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete {selectedStudentIds.size} student{selectedStudentIds.size === 1 ? "" : "s"}?
+
+              {selectedStudentIds.size <= 5 && (
+                <div className="mt-3 space-y-1">
+                  <p className="font-medium text-sm text-foreground">Selected students:</p>
+                  <ul className="list-disc list-inside text-sm">
+                    {Array.from(selectedStudentIds).map(id => {
+                      const student = students.find(s => s.id === id);
+                      return student ? <li key={id}>{student.name} ({student.lrn})</li> : null;
+                    })}
+                  </ul>
+                </div>
+              )}
+
+              <p className="mt-3 text-sm text-amber-600">
+                Note: Students will be marked as inactive and can be reactivated later by editing their status.
+              </p>
+
+              {deleteError && (
+                <p className="mt-2 text-sm text-destructive">{deleteError}</p>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeletingStudents}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleBulkDelete}
+              disabled={isDeletingStudents}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              {isDeletingStudents ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                "Delete"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
         </TabsContent>
 
         <TabsContent value="parents" className="flex-1 flex flex-col min-h-0 mt-0">
@@ -1781,6 +2039,16 @@ export default function RegistryPage() {
                   </CardDescription>
                 </div>
                 <div className="flex flex-col sm:flex-row gap-2 sm:items-center w-full sm:w-auto">
+                  <Select value={guardianStatusFilter} onValueChange={setGuardianStatusFilter}>
+                    <SelectTrigger className="w-full sm:min-w-[140px] pl-3 pr-3 py-2 text-sm border border-border rounded-full bg-card text-muted-foreground shadow-sm">
+                      <SelectValue placeholder="All statuses" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All statuses</SelectItem>
+                      <SelectItem value="active">Active</SelectItem>
+                      <SelectItem value="inactive">Inactive</SelectItem>
+                    </SelectContent>
+                  </Select>
                   <input
                     type="text"
                     value={guardianSearchTerm}
@@ -1788,6 +2056,21 @@ export default function RegistryPage() {
                     placeholder="Search name, email, or linked student..."
                     className="w-full sm:w-72 px-3 py-2 text-sm border border-border rounded-full bg-card text-muted-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-[#1B4D3E]/20 focus:border-[#1B4D3E] placeholder:text-muted-foreground/70"
                   />
+                  {selectedGuardianIds.size > 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="destructive"
+                      className="text-sm"
+                      onClick={() => {
+                        setDeleteGuardianError(null);
+                        setIsDeleteGuardianDialogOpen(true);
+                      }}
+                    >
+                      <Trash2 className="w-4 h-4 mr-2" />
+                      Delete Selected ({selectedGuardianIds.size})
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardHeader>
@@ -1796,6 +2079,13 @@ export default function RegistryPage() {
                 <Table className="w-full min-w-[640px]">
                   <TableHeader className="sticky top-0 z-10">
                     <TableRow className="bg-muted">
+                      <TableHead className="w-12 bg-muted">
+                        <Checkbox
+                          checked={filteredGuardians.length > 0 && selectedGuardianIds.size === filteredGuardians.length}
+                          onCheckedChange={handleSelectAllGuardians}
+                          aria-label="Select all guardians"
+                        />
+                      </TableHead>
                       <TableHead className="font-bold text-primary bg-muted">Parent Name</TableHead>
                       <TableHead className="font-bold text-primary bg-muted">Email</TableHead>
                       <TableHead className="font-bold text-primary bg-muted">Linked Students</TableHead>
@@ -1806,20 +2096,32 @@ export default function RegistryPage() {
                   <TableBody>
                     {isLoadingGuardians ? (
                       <TableRow>
-                        <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                        <TableCell colSpan={6} className="py-10 text-center text-sm text-muted-foreground">
                           <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
                           Loading parents...
                         </TableCell>
                       </TableRow>
                     ) : filteredGuardians.length > 0 ? (
-                      filteredGuardians.map((guardian) => (
-                        <TableRow
-                          key={guardian.id}
-                          className="transition-all duration-150 hover:bg-card hover:shadow-sm"
-                        >
-                          <TableCell className="font-medium text-foreground">
-                            {guardian.fullName}
-                          </TableCell>
+                      filteredGuardians.map((guardian) => {
+                        const isSelected = selectedGuardianIds.has(guardian.id);
+
+                        return (
+                          <TableRow
+                            key={guardian.id}
+                            className={`transition-all duration-150 hover:bg-card hover:shadow-sm ${
+                              isSelected ? "bg-primary/5 border-primary/20" : ""
+                            }`}
+                          >
+                            <TableCell className="w-12" onClick={(e) => e.stopPropagation()}>
+                              <Checkbox
+                                checked={isSelected}
+                                onCheckedChange={(checked) => handleSelectGuardian(guardian.id, checked as boolean)}
+                                aria-label={`Select ${guardian.fullName}`}
+                              />
+                            </TableCell>
+                            <TableCell className="font-medium text-foreground">
+                              {guardian.fullName}
+                            </TableCell>
                           <TableCell className="text-muted-foreground">{guardian.email}</TableCell>
                           <TableCell className="text-muted-foreground">
                             {guardian.linkedStudents.length > 0 ? (
@@ -1885,10 +2187,11 @@ export default function RegistryPage() {
                             </Button>
                           </TableCell>
                         </TableRow>
-                      ))
+                        );
+                      })
                     ) : (
                       <TableRow>
-                        <TableCell colSpan={5} className="py-10 text-center text-sm text-muted-foreground">
+                        <TableCell colSpan={6} className="py-10 text-center text-sm text-muted-foreground">
                           {guardians.length === 0
                             ? "No parents found. Parents are created when you import students with guardian information."
                             : "No parents match your search."}
@@ -1900,6 +2203,55 @@ export default function RegistryPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Guardian Delete Confirmation Dialog */}
+          <AlertDialog open={isDeleteGuardianDialogOpen} onOpenChange={setIsDeleteGuardianDialogOpen}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete Guardians</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Are you sure you want to delete {selectedGuardianIds.size} guardian{selectedGuardianIds.size === 1 ? "" : "s"}?
+
+                  {selectedGuardianIds.size <= 5 && (
+                    <div className="mt-3 space-y-1">
+                      <p className="font-medium text-sm text-foreground">Selected guardians:</p>
+                      <ul className="list-disc list-inside text-sm">
+                        {Array.from(selectedGuardianIds).map(id => {
+                          const guardian = guardians.find(g => g.id === id);
+                          return guardian ? <li key={id}>{guardian.fullName} ({guardian.email})</li> : null;
+                        })}
+                      </ul>
+                    </div>
+                  )}
+
+                  <p className="mt-3 text-sm text-amber-600">
+                    Note: Guardians will be marked as inactive and can be reactivated later by editing their status.
+                  </p>
+
+                  {deleteGuardianError && (
+                    <p className="mt-2 text-sm text-destructive">{deleteGuardianError}</p>
+                  )}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={isDeletingGuardians}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={handleBulkDeleteGuardians}
+                  disabled={isDeletingGuardians}
+                  className="bg-destructive text-white hover:bg-destructive/90"
+                >
+                  {isDeletingGuardians ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    "Delete"
+                  )}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </TabsContent>
       </Tabs>
       </div>
