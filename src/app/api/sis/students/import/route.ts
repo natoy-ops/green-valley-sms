@@ -249,65 +249,55 @@ export async function POST(request: NextRequest) {
     section: SectionRow;
   }[] = [];
 
+  // Fetch all levels and sections once to avoid N+1 queries
+  const { data: allLevels } = await supabase.from("levels").select("id, name, is_active");
+  const { data: allSections } = await supabase.from("sections").select("id, name, level_id, is_active");
+
+  const levelsMap = new Map<string, LevelRow>();
+  if (allLevels) {
+    for (const l of allLevels) {
+      levelsMap.set(l.name.toLowerCase().trim(), l as LevelRow);
+    }
+  }
+
+  const sectionsMap = new Map<string, SectionRow>();
+  if (allSections) {
+    for (const s of allSections) {
+      sectionsMap.set(`${s.level_id}_${s.name.toLowerCase().trim()}`, s as SectionRow);
+    }
+  }
+
   // First pass: validate all rows (levels/sections) without inserting any students
   for (let index = 0; index < rows.length; index++) {
-    const row = rows[index];
+    const row = rows[index]!;
     const rowNumber = index + 2; // account for header
 
-    const { data: levelRow, error: levelError } = await supabase
-      .from("levels")
-      .select("id, name, is_active")
-      .eq("name", row.levelName)
-      .single<LevelRow>();
+    const targetLevelName = row.levelName.toLowerCase().trim();
+    const levelRow = levelsMap.get(targetLevelName);
 
-    if (levelError || !levelRow) {
+    if (!levelRow) {
       rowErrors.push({ rowNumber, message: "Unable to find the selected level / year." });
       continue;
     }
 
     const targetSectionName = (row.sectionName ?? "").trim();
-
     let sectionRow: SectionRow | null = null;
 
     if (targetSectionName) {
-      const { data: explicitSectionRow, error: sectionError } = await supabase
-        .from("sections")
-        .select("id, name, level_id, is_active")
-        .eq("name", targetSectionName)
-        .eq("level_id", levelRow.id)
-        .single<SectionRow>();
+      const sectionKey = `${levelRow.id}_${targetSectionName.toLowerCase()}`;
+      sectionRow = sectionsMap.get(sectionKey) || null;
 
-      if (sectionError || !explicitSectionRow) {
+      if (!sectionRow) {
         rowErrors.push({ rowNumber, message: "Unable to find the selected section for this level." });
         continue;
       }
-
-      sectionRow = explicitSectionRow;
     } else {
       // Fallback to "Unassigned" section for this level (same behavior as single-student POST)
       const fallbackName = "Unassigned";
+      const fallbackKey = `${levelRow.id}_${fallbackName.toLowerCase()}`;
+      sectionRow = sectionsMap.get(fallbackKey) || null;
 
-      const { data: existingFallbackRows, error: existingFallbackError } = await supabase
-        .from("sections")
-        .select("id, name, level_id, is_active")
-        .eq("name", fallbackName)
-        .eq("level_id", levelRow.id)
-        .limit(1);
-
-      if (existingFallbackError) {
-        rowErrors.push({
-          rowNumber,
-          message: "Unable to resolve section for this level.",
-        });
-        continue;
-      }
-
-      const existingFallbackList =
-        (existingFallbackRows as SectionRow[] | null) ?? [];
-
-      if (existingFallbackList.length > 0) {
-        sectionRow = existingFallbackList[0]!;
-      } else {
+      if (!sectionRow) {
         const { data: createdFallbackRows, error: createFallbackError } = await supabase
           .from("sections")
           .insert({
@@ -326,7 +316,8 @@ export async function POST(request: NextRequest) {
           continue;
         }
 
-        sectionRow = (createdFallbackRows as SectionRow[])[0]!;
+        sectionRow = createdFallbackRows[0] as SectionRow;
+        sectionsMap.set(fallbackKey, sectionRow); // Cache to prevent duplicate creations
       }
     }
 
@@ -409,14 +400,14 @@ export async function POST(request: NextRequest) {
   const credentials: StudentCredential[] = [];
   const accountWarnings: CsvImportRowError[] = [];
 
+  // Group valid students for batch processing
+  const validStudentsToProcess = [];
   for (let i = 0; i < studentRows.length; i++) {
     const studentRow = studentRows[i]!;
     const source = resolvableRows[i]!.row;
     const rowNumber = resolvableRows[i]!.rowNumber;
-
     const studentEmail = source.studentEmail?.trim().toLowerCase() ?? null;
 
-    // Skip if no email or invalid email format
     if (!studentEmail || !EMAIL_REGEX.test(studentEmail)) {
       if (studentEmail) {
         accountWarnings.push({
@@ -426,7 +417,20 @@ export async function POST(request: NextRequest) {
       }
       continue;
     }
+    validStudentsToProcess.push({ studentRow, source, rowNumber, studentEmail });
+  }
 
+  // Helper to process a chunk of items in parallel
+  const processInChunks = async <T, R>(items: T[], chunkSize: number, processor: (item: T) => Promise<R>) => {
+    const results: R[] = [];
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, i + chunkSize);
+      results.push(...await Promise.all(chunk.map(processor)));
+    }
+    return results;
+  };
+
+  await processInChunks(validStudentsToProcess, 10, async ({ studentRow, rowNumber, studentEmail }) => {
     const fullName = `${studentRow.first_name} ${studentRow.last_name}`.trim();
 
     try {
@@ -467,7 +471,7 @@ export async function POST(request: NextRequest) {
             rowNumber,
             message: `Could not create login for "${studentEmail}": ${reason}. Student imported but no login account created.`,
           });
-          continue;
+          return; // Skip to next
         }
 
         appUserId = createdAuthUser.user.id;
@@ -491,7 +495,7 @@ export async function POST(request: NextRequest) {
             rowNumber,
             message: `Could not create app user for "${studentEmail}". Student imported but login may not work.`,
           });
-          continue;
+          return;
         }
 
         credentials.push({
@@ -535,7 +539,7 @@ export async function POST(request: NextRequest) {
         message: `Unexpected error creating account for "${studentEmail}". Student imported but no login account created.`,
       });
     }
-  }
+  });
 
   // Fourth pass: create guardian/parent accounts for rows with valid Guardian Email
   // Group by guardian email to avoid creating duplicate accounts for siblings
@@ -584,8 +588,9 @@ export async function POST(request: NextRequest) {
   }
 
   const guardianCredentials: GuardianCredential[] = [];
+  const guardianEntries = Array.from(guardianEmailToStudents.entries());
 
-  for (const [guardianEmail, linkedStudentInfos] of guardianEmailToStudents) {
+  await processInChunks(guardianEntries, 10, async ([guardianEmail, linkedStudentInfos]) => {
     const firstInfo = linkedStudentInfos[0]!;
     const guardianName = firstInfo.guardianName;
     const linkedStudentNames = linkedStudentInfos.map((s) => s.studentName);
@@ -628,7 +633,7 @@ export async function POST(request: NextRequest) {
             rowNumber: firstInfo.rowNumber,
             message: `Could not create login for guardian "${guardianEmail}": ${reason}. No parent account created.`,
           });
-          continue;
+          return;
         }
 
         appUserId = createdAuthUser.user.id;
@@ -652,7 +657,7 @@ export async function POST(request: NextRequest) {
             rowNumber: firstInfo.rowNumber,
             message: `Could not create app user for guardian "${guardianEmail}". Login may not work.`,
           });
-          continue;
+          return;
         }
 
         guardianCredentials.push({
@@ -699,7 +704,7 @@ export async function POST(request: NextRequest) {
         message: `Unexpected error creating guardian account for "${guardianEmail}".`,
       });
     }
-  }
+  });
 
   const importedStudents = studentRows.map((row, index) => {
     const source = resolvableRows[index]!.row;
