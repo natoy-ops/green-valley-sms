@@ -161,6 +161,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const seenEmails = new Set<string>();
   const maxRows = 1000;
+  
+  type ValidRow = {
+    rowNumber: number;
+    email: string;
+    fullName: string;
+  };
+  
+  const validRows: ValidRow[] = [];
 
   for (let rowNumber = 2; rowNumber <= worksheet.rowCount && rowNumber <= maxRows + 1; rowNumber++) {
     const row = worksheet.getRow(rowNumber);
@@ -197,7 +205,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     seenEmails.add(email);
+    validRows.push({ rowNumber, email, fullName });
+  }
 
+  // Helper to process a chunk of items in parallel
+  const processInChunks = async <T, R>(items: T[], chunkSize: number, processor: (item: T) => Promise<R>) => {
+    const results: R[] = [];
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, i + chunkSize);
+      results.push(...await Promise.all(chunk.map(processor)));
+    }
+    return results;
+  };
+
+  await processInChunks(validRows, 10, async ({ rowNumber, email, fullName }) => {
     try {
       const randomPassword = generateRandomPassword();
 
@@ -222,7 +243,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         const reason = status === 422 ? "EMAIL_IN_USE" : "AUTH_CREATE_FAILED";
         rowErrors.push({ row: rowNumber, email, reason });
         skipped += 1;
-        continue;
+        return;
       }
 
       const authUser = createdUserResult.user;
@@ -244,7 +265,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         });
         rowErrors.push({ row: rowNumber, email, reason: "APP_USER_INSERT_FAILED" });
         skipped += 1;
-        continue;
+        return;
       }
 
       created += 1;
@@ -257,7 +278,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       rowErrors.push({ row: rowNumber, email, reason: "UNKNOWN_ERROR" });
       skipped += 1;
     }
-  }
+  });
 
   return formatSuccess({ summary: { total, created, skipped }, credentials, rowErrors }, 201);
 }

@@ -21,7 +21,7 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { user, isLoading, isAuthenticated, refresh, clear } = useSession({
+  const { user, isLoading, isValidating, isAuthenticated, error, refresh, clear } = useSession({
     refreshInterval: 5 * 60 * 1000, // Refresh session every 5 minutes
     revalidateOnFocus: false, // Don't refetch on tab focus
     revalidateOnReconnect: false, // Don't refetch on network reconnect
@@ -35,8 +35,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Redirect guard - only redirects if not authenticated and not on login page
+  // Don't redirect during transient errors (503) while SWR is retrying
   useEffect(() => {
-    if (isLoading) {
+    if (isLoading || isValidating) {
       return;
     }
     if (typeof window === "undefined") return;
@@ -46,9 +47,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (isPublicPath) return;
     if (isAuthenticated) return;
 
+    // If there's a transient error (e.g. 503), don't kick the user out
+    if (error) {
+      console.warn("[AuthContext] session fetch error, not redirecting", error);
+      return;
+    }
+
     console.log("[AuthContext] redirecting to /login because user is not authenticated");
     window.location.href = "/login";
-  }, [isLoading, isAuthenticated, currentPathname]);
+  }, [isLoading, isValidating, isAuthenticated, error, currentPathname]);
 
   const handleLogin = useCallback(
     async (email: string, password: string) => {

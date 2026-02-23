@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSupabaseClient } from "@/core/db/supabase-client.admin";
 import type { AuthUser, UserRole } from "@/core/auth/types";
+import { retryAsync } from "@/core/http/retry";
 
 function formatSuccess<T>(data: T) {
   return {
@@ -54,14 +55,14 @@ export async function POST(request: NextRequest) {
   let authResult;
   let authError;
   try {
-    const authResponse = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    const authResponse = await retryAsync(
+      () => supabase.auth.signInWithPassword({ email, password }),
+      { maxAttempts: 3, baseDelayMs: 500, label: "/api/auth/login" }
+    );
     authResult = authResponse.data;
     authError = authResponse.error;
   } catch (err) {
-    console.error("[/api/auth/login] Supabase signInWithPassword failed", err);
+    console.error("[/api/auth/login] Supabase signInWithPassword failed after retries", err);
     return formatError(
       503,
       "AUTH_SERVICE_UNAVAILABLE",

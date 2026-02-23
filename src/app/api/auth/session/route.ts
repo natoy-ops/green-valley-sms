@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSupabaseClient } from "@/core/db/supabase-client.admin";
 import type { AuthUser, UserRole } from "@/core/auth/types";
+import { retryAsync } from "@/core/http/retry";
 
 function formatSuccess<T>(data: T) {
   return {
@@ -96,15 +97,37 @@ export async function GET(request: NextRequest) {
 
   // Try to validate the access token first
   if (accessToken) {
-    const { data: userResult, error: tokenError } = await supabase.auth.getUser(accessToken);
+    let userResult;
+    let tokenError;
+    try {
+      const response = await retryAsync(
+        () => supabase.auth.getUser(accessToken),
+        { maxAttempts: 3, baseDelayMs: 500, label: "session.getUser" }
+      );
+      userResult = response.data;
+      tokenError = response.error;
+    } catch (err) {
+      console.error("[/api/auth/session] supabase.auth.getUser failed after retries", err);
+      return formatError(503, "AUTH_SERVICE_UNAVAILABLE", "Authentication service is temporarily unavailable. Please try again.");
+    }
 
     if (!tokenError && userResult?.user) {
       userId = userResult.user.id;
     } else if (refreshToken) {
       // Access token is invalid/expired, try to refresh
-      const { data: refreshResult, error: refreshError } = await supabase.auth.refreshSession({
-        refresh_token: refreshToken,
-      });
+      let refreshResult;
+      let refreshError;
+      try {
+        const response = await retryAsync(
+          () => supabase.auth.refreshSession({ refresh_token: refreshToken }),
+          { maxAttempts: 3, baseDelayMs: 500, label: "session.refreshSession" }
+        );
+        refreshResult = response.data;
+        refreshError = response.error;
+      } catch (err) {
+        console.error("[/api/auth/session] supabase.auth.refreshSession failed after retries", err);
+        return formatError(503, "AUTH_SERVICE_UNAVAILABLE", "Authentication service is temporarily unavailable. Please try again.");
+      }
 
       if (refreshError || !refreshResult?.session || !refreshResult.user) {
         return formatError(401, "SESSION_EXPIRED", "Session has expired. Please log in again.");
@@ -118,9 +141,19 @@ export async function GET(request: NextRequest) {
     }
   } else if (refreshToken) {
     // No access token but have refresh token, try to refresh
-    const { data: refreshResult, error: refreshError } = await supabase.auth.refreshSession({
-      refresh_token: refreshToken,
-    });
+    let refreshResult;
+    let refreshError;
+    try {
+      const response = await retryAsync(
+        () => supabase.auth.refreshSession({ refresh_token: refreshToken }),
+        { maxAttempts: 3, baseDelayMs: 500, label: "session.refreshSession" }
+      );
+      refreshResult = response.data;
+      refreshError = response.error;
+    } catch (err) {
+      console.error("[/api/auth/session] supabase.auth.refreshSession failed after retries", err);
+      return formatError(503, "AUTH_SERVICE_UNAVAILABLE", "Authentication service is temporarily unavailable. Please try again.");
+    }
 
     if (refreshError || !refreshResult?.session || !refreshResult.user) {
       return formatError(401, "SESSION_EXPIRED", "Session has expired. Please log in again.");

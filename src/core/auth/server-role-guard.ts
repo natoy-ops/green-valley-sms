@@ -3,6 +3,7 @@ import type { User } from "@supabase/supabase-js";
 import type { UserRole } from "@/core/auth/types";
 import { getAdminSupabaseClient } from "@/core/db/supabase-client.admin";
 import { ALL_USER_ROLES } from "@/config/roles";
+import { retryAsync } from "@/core/http/retry";
 
 export interface RoleGuardUser {
   id: string;
@@ -74,7 +75,26 @@ export async function requireRoles(
 
   const supabase = getAdminSupabaseClient();
 
-  const { data: userResult, error: tokenError } = await supabase.auth.getUser(accessToken);
+  let userResult;
+  let tokenError;
+  try {
+    const response = await retryAsync(
+      () => supabase.auth.getUser(accessToken),
+      { maxAttempts: 3, baseDelayMs: 500, label: "requireRoles.getUser" }
+    );
+    userResult = response.data;
+    tokenError = response.error;
+  } catch (err) {
+    console.error("[requireRoles] supabase.auth.getUser failed after retries", err);
+    return {
+      error: buildErrorResponse(
+        503,
+        "AUTH_SERVICE_UNAVAILABLE",
+        "Authentication service is temporarily unavailable. Please try again.",
+        err instanceof Error ? { name: err.name, message: err.message } : err
+      ),
+    };
+  }
 
   if (tokenError || !userResult?.user) {
     return {

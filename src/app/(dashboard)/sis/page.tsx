@@ -86,7 +86,8 @@ export default function RegistryPage() {
   const [levels, setLevels] = useState<LevelOption[]>([]);
   const [sections, setSections] = useState<SectionOption[]>([]);
   const levelOptions = levels.map((level) => level.name);
-  const sectionOptions = sections.map((section) => section.name);
+  // Ensure unique section names for the filter dropdown
+  const sectionOptions = Array.from(new Set(sections.map((section) => section.name)));
   const [newLevel, setNewLevel] = useState("");
   const [editLevelId, setEditLevelId] = useState<string>("");
   const [editLevelName, setEditLevelName] = useState<string>("");

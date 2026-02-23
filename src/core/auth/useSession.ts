@@ -13,6 +13,12 @@ interface SessionResponse {
 async function sessionFetcher(url: string): Promise<AuthUser | null> {
   const res = await fetch(url, { method: "GET" });
 
+  // 503 = transient network issue reaching Supabase; throw so SWR retries
+  // instead of clearing the session and kicking the user out
+  if (res.status === 503) {
+    throw new Error("Authentication service temporarily unavailable");
+  }
+
   if (res.status === 401 || res.status === 403) {
     return null;
   }
@@ -56,8 +62,9 @@ export function useSession(options: UseSessionOptions = {}) {
       revalidateOnReconnect: config.revalidateOnReconnect,
       refreshInterval: config.refreshInterval,
       dedupingInterval: 60000, // Dedupe requests within 1 minute
-      errorRetryCount: 2,
-      shouldRetryOnError: false,
+      errorRetryCount: 3,
+      shouldRetryOnError: true, // Retry on 503 / transient errors
+      errorRetryInterval: 2000, // Wait 2s between retries
       revalidateIfStale: false, // Don't auto-revalidate stale data
       revalidateOnMount: true, // Fetch on mount
     }
